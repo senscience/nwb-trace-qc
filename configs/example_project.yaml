@@ -1,0 +1,55 @@
+# nwb-trace-qc — example project config (commented template)
+# Copy this, point at your data, and run `nwb-qc run --config <your-copy>.yaml`.
+
+project_name: "My Cohort QC"
+
+# All relative paths below are resolved against the directory containing THIS yaml file.
+output_dir: ./qc_output
+
+# 1. WHERE THE NWB FILES LIVE. One or more "sources"; each is a logical dataset label.
+nwb_sources:
+  - dataset: cohort_a
+    path: /data/cohort_a
+    recursive: true
+    glob: "**/*.nwb"        # default; override for nested archive layouts
+
+  # Example with nested archive layout (multiple subfolders containing data/<idx>/*.nwb)
+  - dataset: cohort_b
+    path: /data/cohort_b
+    glob: "electrical-cell-recording (*)/data/*/*.nwb"
+
+# 2. (Optional) Pre-computed acquisition parquets the pipeline REUSES instead of opening
+#    every NWB to count stimuli. If your data wrangler already produced these, point here.
+acquisition_tables:
+  - path: /data/output_cohort_a/parquet/acquisitions.parquet
+    nwb_key_column: nwb_file           # column linking each acquisition row to an NWB file
+    nwb_key_format: stem               # one of: stem | basename | absolute
+    columns:
+      stimulus_type: stimulus_type
+      rate_hz: rate_hz
+      n_samples: n_samples
+      clamp_mode: clamp_mode
+      sweep_number: sweep_number
+
+# 3. Stimulus-protocol family mapping. The pipeline reasons in families; your lab can use
+#    whatever protocol names you want. Edit if needed.
+stimulus_protocols:
+  spontaneous_hold: [SponHold3, SponHold30, SponNoHold30, StartHold]
+  test_pulse:       [Rac, TestAmpl, TestRheo]
+  iv_subthreshold:  [IV]
+  ap_waveform:      [APWaveform]
+  rest_firing:      [IDRest]
+  threshold_search: [IDThres, IDThreshold]
+
+# 4. Thresholds — usually a separate YAML so you can edit without touching project config.
+thresholds_file: ./my_thresholds.yaml
+
+# 5. Execution.
+n_workers: 6
+
+# 6. (Optional) Cell-id table for richer dataset attribution (e.g. one CSV that knows
+#    which dataset each cell belongs to).
+cell_table:
+  path: /data/my_cells.csv
+  cell_id_column: cell_id
+  dataset_columns: [in_cohort_a, in_cohort_b]

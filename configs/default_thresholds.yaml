@@ -1,0 +1,46 @@
+# Default pass / flag / fail thresholds for trace-level QC metrics.
+# Copy + edit per project; reference your copy from your project YAML's `thresholds_file`.
+#
+# Rule keys:
+#   fail_above / fail_below : numeric thresholds
+#   flag_above / flag_below : numeric thresholds
+#   fail_if_false / fail_if_true / flag_if_false / flag_if_true : boolean rules
+# Precedence: any fail wins; else any flag; else pass. NaN values flag.
+
+vrest_mv:
+  # Too depolarised → unhealthy. Pyramidal-cell defaults; thalamic relay neurons run ~-65.
+  fail_above: -45
+  flag_above: -55
+
+vrest_drift_mv:
+  flag_above: 5
+
+rs_mohm_final:
+  fail_above: 30
+  flag_above: 25
+
+rs_drift_pct:
+  fail_above: 30
+  flag_above: 20
+
+# rin_mohm: not currently computed (requires stimulus-current pairing); omitted from thresholds
+# until the pipeline derives it from IV protocol acquisitions.
+
+ap_amp_overshoot_mv:
+  fail_below: 0          # no overshoot at all → fail
+  flag_below: 10         # weak overshoot → flag
+
+ap_threshold_drift_mv:
+  flag_above: 5
+
+baseline_rms_mv:
+  flag_above: 1.5
+
+n_sweeps_clipped:
+  fail_above: 0
+
+n_sweeps_nan:
+  fail_above: 0
+
+qc_protocol_coverage:
+  fail_if_false: true

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nwb-trace-qc"
+version = "0.1.0"
+description = "Cohort-scale, configurable QC for patch-clamp electrophysiology traces stored in NWB."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cristina Gonzalez" }]
+dependencies = [
+    "pynwb>=2.5",
+    "efel>=5",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "pyyaml",
+    "click>=8",
+    "pydantic>=2",
+    "matplotlib",
+]
+
+[project.scripts]
+nwb-qc = "nwb_trace_qc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nwb_trace_qc = ["templates/*.html"]
