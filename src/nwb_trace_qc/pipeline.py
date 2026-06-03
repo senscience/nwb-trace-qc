@@ -249,7 +249,10 @@ def run(
         raise FileNotFoundError(f"thresholds_file not found: {cfg.thresholds_file}")
     thresholds = load_thresholds(cfg.thresholds_file)
     rows = []
-    for r in manifest.itertuples(index=False):
+    total_th = int(manifest.shape[0])
+    for i, r in enumerate(manifest.itertuples(index=False), start=1):
+        if progress_callback and (i % 50 == 0 or i == total_th):
+            progress_callback("thresholds", i, total_th)
         metric_row = cache_df[cache_df["nwb_sha256"] == r.nwb_sha256]
         if metric_row.empty:
             rows.append({
@@ -283,30 +286,35 @@ def run(
     })
 
     # ─── Stage 3.5: thumbnails for non-pass cells ────────────────
-    t0 = _stage_start("thumbnails", total=int((verdicts["computed_verdict"] != "pass").sum()))
+    total_thumbs = int((verdicts["computed_verdict"] != "pass").sum())
+    t0 = _stage_start("thumbnails", total=total_thumbs)
     thumbs: dict[str, list[Path]] = {}
     cfg.thumbnails_dir.mkdir(parents=True, exist_ok=True)
     seen_for_sha: dict[str, list[Path]] = {}
     n_generated = 0
     n_skipped = 0
+    done_thumbs = 0
     for r in verdicts.itertuples(index=False):
         if r.computed_verdict == "pass":
             continue
+        done_thumbs += 1
         sha8 = r.nwb_sha256[:8]
         if r.nwb_sha256 in seen_for_sha:
             thumbs[r.cell_id] = seen_for_sha[r.nwb_sha256]
-            continue
-        reasons = [t["metric"] for t in (r.triggered_metrics or []) if isinstance(t, dict)]
-        out = cfg.thumbnails_dir / f"{sha8}__{Path(r.nwb_path).stem}.png"
-        if out.exists():
-            n_skipped += 1
         else:
-            _make_thumbnail(Path(r.nwb_path), out, families=cfg.stimulus_protocols, reasons=reasons)
+            reasons = [t["metric"] for t in (r.triggered_metrics or []) if isinstance(t, dict)]
+            out = cfg.thumbnails_dir / f"{sha8}__{Path(r.nwb_path).stem}.png"
             if out.exists():
-                n_generated += 1
-        if out.exists():
-            seen_for_sha[r.nwb_sha256] = [out]
-            thumbs[r.cell_id] = [out]
+                n_skipped += 1
+            else:
+                _make_thumbnail(Path(r.nwb_path), out, families=cfg.stimulus_protocols, reasons=reasons)
+                if out.exists():
+                    n_generated += 1
+            if out.exists():
+                seen_for_sha[r.nwb_sha256] = [out]
+                thumbs[r.cell_id] = [out]
+        if progress_callback:
+            progress_callback("thumbnails", done_thumbs, total_thumbs)
     _stage_end("thumbnails", t0, {
         "n_generated": int(n_generated),
         "n_skipped_existing": int(n_skipped),

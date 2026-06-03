@@ -48,6 +48,14 @@ def _eta(done: int, total: int, elapsed_s: float) -> str:
     return f"{remaining/3600:.1f}h"
 
 
+def _bar(done: int, total: int, width: int = 22) -> str:
+    if total <= 0:
+        return "░" * width
+    frac = min(1.0, max(0.0, done / total))
+    filled = int(round(width * frac))
+    return "█" * filled + "░" * (width - filled)
+
+
 def _make_progress_callback() -> tuple[Callable[[str, int, int], None], list[float]]:
     """Returns (callback, [stage_t0]). The callback prints a carriage-return
     progress line on TTY stdout. On non-TTY, stays silent (logging already
@@ -71,10 +79,11 @@ def _make_progress_callback() -> tuple[Callable[[str, int, int], None], list[flo
         stage_lbl = click.style(f"[{stage}]", fg="cyan")
         if total > 0:
             pct = 100.0 * done / total
+            bar = click.style(_bar(done, total), fg="green" if pct >= 100 else "cyan")
             counts = click.style(f"{done}/{total}", bold=True)
-            pct_str = click.style(f"({pct:.1f}%)", fg="green" if pct >= 100 else "yellow")
-            eta = click.style(_eta(done, total, elapsed), dim=True)
-            line = f"  {stage_lbl} {counts} {pct_str}  elapsed {elapsed:.1f}s  ETA {eta}"
+            pct_str = click.style(f"{pct:5.1f}%", fg="green" if pct >= 100 else "yellow")
+            eta = click.style(f"ETA {_eta(done, total, elapsed)}", dim=True)
+            line = f"  {stage_lbl} {bar} {counts} {pct_str}  elapsed {elapsed:.1f}s  {eta}"
         else:
             line = f"  {stage_lbl} {done} done · elapsed {elapsed:.1f}s"
         # \033[K clears from cursor to end of line — handles ANSI-styled output
