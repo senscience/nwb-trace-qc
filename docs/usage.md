@@ -174,13 +174,7 @@ vision_judge:
   cache_responses: true
 ```
 
-Install the provider SDK (one or both):
-
-```bash
-pip install 'nwb-trace-qc[vision-anthropic]'   # or [vision-openai]
-```
-
-Set the API key and run:
+Both the `anthropic` and `openai` SDKs ship with `nwb-trace-qc` by default, so no extra install is needed — just set the API key for whichever provider your `vision_judge.provider` points at and run:
 
 ```bash
 export ANTHROPIC_API_KEY=...
