@@ -140,8 +140,10 @@ def init_config(root_path: Path, name: str | None, output: Path | None, guess_ta
                 f"({n_files} files, {total_bytes / 1024**3:.2f} GB)"
             )
             continue
-        # (b) Directory tree
-        nwbs = list(sub.rglob("*.nwb"))
+        # (b) Directory tree — discover both HDF5 (*.nwb files) and Zarr (*.nwb.zarr dirs)
+        nwb_hdf5 = [p for p in sub.rglob("*.nwb") if p.is_file()]
+        nwb_zarr = [p for p in sub.rglob("*.nwb.zarr") if p.is_dir()]
+        nwbs = nwb_hdf5 + nwb_zarr
         if not nwbs: continue
         rel_depths = {len(p.relative_to(sub).parts) for p in nwbs}
         glob = "**/*.nwb" if max(rel_depths) > 1 else "*.nwb"
@@ -152,7 +154,8 @@ def init_config(root_path: Path, name: str | None, output: Path | None, guess_ta
             "glob": glob,
         })
     # Root has NWBs directly?
-    root_nwbs = list(root_path.glob("*.nwb"))
+    root_nwbs = [p for p in root_path.glob("*.nwb") if p.is_file()] + \
+                [p for p in root_path.glob("*.nwb.zarr") if p.is_dir()]
     if root_nwbs and not sources:
         sources.append({
             "dataset": name, "path": str(root_path), "recursive": False, "glob": "*.nwb"

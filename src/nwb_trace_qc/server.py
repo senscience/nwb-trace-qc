@@ -24,9 +24,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import pynwb
 
 from .config import ProjectConfig
+from .nwb_io import open_nwb
 from .stimuli import StimulusFamilyMap
 
 log = logging.getLogger(__name__)
@@ -79,8 +79,7 @@ def _lttb(x: np.ndarray, y: np.ndarray, n_out: int) -> tuple[np.ndarray, np.ndar
 def _read_sweeps(nwb_path: Path) -> list[dict[str, Any]]:
     """Open the NWB and list its voltage-trace acquisitions."""
     out: list[dict[str, Any]] = []
-    with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
-        f = io.read()
+    with open_nwb(nwb_path) as f:
         for i, (name, obj) in enumerate(f.acquisition.items()):
             unit = (getattr(obj, "unit", "") or "").lower()
             if unit not in {"volts", "v", ""}:
@@ -102,8 +101,7 @@ def _read_sweeps(nwb_path: Path) -> list[dict[str, Any]]:
 
 def _read_trace(nwb_path: Path, sweep_idx: int, max_points: int) -> dict[str, Any]:
     """Open the NWB, pull sweep #sweep_idx, decimate to max_points, return data."""
-    with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
-        f = io.read()
+    with open_nwb(nwb_path) as f:
         names = []
         for name, obj in f.acquisition.items():
             unit = (getattr(obj, "unit", "") or "").lower()

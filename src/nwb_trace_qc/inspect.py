@@ -280,14 +280,26 @@ def _scan_subroot(subroot: Path) -> DatasetEntry:
     for pq_path in sorted(inner.rglob("*.parquet")):
         entry.parquets.append(_summarize_parquet(pq_path))
 
-    # NWB asset directories (recursive)
-    nwb_dirs: dict[Path, list[Path]] = {}
+    # NWB asset directories (recursive) — count both HDF5 (.nwb files) and Zarr (.nwb.zarr dirs)
+    nwb_dirs: dict[Path, list[tuple[Path, int]]] = {}     # parent → [(child, size_bytes)]
+    # HDF5
     for nwb in inner.rglob("*.nwb"):
-        nwb_dirs.setdefault(nwb.parent, []).append(nwb)
-    # Group by deepest common assets-style parent if possible
-    for d, files in sorted(nwb_dirs.items()):
-        total = sum(f.stat().st_size for f in files if f.is_file())
-        entry.nwb_dirs.append(NWBAssets(path=d, count=len(files), total_bytes=total))
+        if nwb.is_file():
+            try:
+                nwb_dirs.setdefault(nwb.parent, []).append((nwb, nwb.stat().st_size))
+            except OSError:
+                continue
+    # Zarr (each *.nwb.zarr/ is one logical NWB; sum its inner bytes)
+    for zd in inner.rglob("*.nwb.zarr"):
+        if zd.is_dir():
+            try:
+                size = sum(p.stat().st_size for p in zd.rglob("*") if p.is_file())
+            except OSError:
+                size = 0
+            nwb_dirs.setdefault(zd.parent, []).append((zd, size))
+    for d, items in sorted(nwb_dirs.items()):
+        total = sum(sz for _, sz in items)
+        entry.nwb_dirs.append(NWBAssets(path=d, count=len(items), total_bytes=total))
     entry.n_nwbs_total = sum(d.count for d in entry.nwb_dirs)
 
     # SWC count (if any)

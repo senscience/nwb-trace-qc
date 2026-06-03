@@ -41,10 +41,9 @@ def _compute_one(args):
 
 def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[str]], reasons: list[str]) -> Path | None:
     """Render up to 3 representative sweeps (one per offending family if possible)."""
-    import pynwb
+    from .nwb_io import open_nwb
     try:
-        with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
-            f = io.read()
+        with open_nwb(nwb_path) as f:
             picks = []
             wanted_families = set()
             # Choose sweeps relevant to the failing reason

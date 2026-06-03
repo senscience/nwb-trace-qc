@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Cristina Gonzalez" }]
 dependencies = [
     "pynwb>=2.5",
+    "hdmf-zarr>=0.10",         # Zarr storage backend for NWB (alternative to HDF5)
     "efel>=5",
     "numpy",
     "pandas",

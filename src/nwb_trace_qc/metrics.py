@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pynwb
 
+from .nwb_io import open_nwb
 from .stimuli import StimulusFamilyMap
 
 warnings.filterwarnings("ignore", message=".*HDMF.*", category=UserWarning)
@@ -332,8 +333,7 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
         "compute_error": None,
     }
     try:
-        with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
-            nwbfile = io.read()
+        with open_nwb(nwb_path) as nwbfile:
             sponhold_vrest: list[float] = []
             rs_estimates_in_order: list[float] = []
             ap_overshoots: list[float] = []

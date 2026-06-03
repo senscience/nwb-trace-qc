@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from .config import NWBSource, ProjectConfig
+from .nwb_io import is_nwb, is_zarr, nwb_mtime, nwb_sha256, nwb_size
 
 log = logging.getLogger(__name__)
 
@@ -75,17 +76,28 @@ class ManifestSourceStats:
 
 
 def _sha256(path: Path, buf: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(buf), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    """Backwards-compat alias; dispatches to nwb_io.nwb_sha256 (HDF5 file hash, Zarr dir fingerprint)."""
+    return nwb_sha256(path, buf)
 
 
 def _discover_paths(source: NWBSource) -> list[Path]:
+    """Discover both HDF5 (`*.nwb` files) and Zarr (`*.nwb.zarr/` directories) under source.path."""
     if source.path is None or not source.path.exists():
         return []
-    return sorted(p for p in source.path.glob(source.glob) if p.is_file() and p.suffix == ".nwb")
+    glob = source.glob
+    # Build candidate set: file glob + directory glob for the Zarr counterpart
+    candidates: set[Path] = set()
+    for p in source.path.glob(glob):
+        if is_nwb(p):
+            candidates.add(p)
+    # If the configured glob only matches files, also pick up sibling *.nwb.zarr dirs
+    # (the most common case: glob="**/*.nwb" — also walk for **/*.nwb.zarr).
+    if ".nwb.zarr" not in glob:
+        zarr_glob = glob.replace("*.nwb", "*.nwb.zarr") if "*.nwb" in glob else f"{glob.rstrip('/')}/*.nwb.zarr"
+        for p in source.path.glob(zarr_glob):
+            if is_zarr(p):
+                candidates.add(p)
+    return sorted(candidates)
 
 
 def _load_source_manifest(
@@ -110,7 +122,9 @@ def _load_source_manifest(
         if not orig:
             continue
         path = Path(orig).expanduser()
-        if path.suffix.lower() != ".nwb":
+        # Accept HDF5 (.nwb) or Zarr (.nwb.zarr) entries
+        name_lower = path.name.lower()
+        if not (name_lower.endswith(".nwb") or name_lower.endswith(".nwb.zarr")):
             continue
         nwb_count += 1
         was_processed = bool(f.get("was_processed", True))
@@ -164,16 +178,23 @@ def build_manifest(cfg: ProjectConfig) -> pd.DataFrame:
 def _rows_from_path_source(source: NWBSource) -> list[CellRow]:
     out: list[CellRow] = []
     for p in _discover_paths(source):
-        st = p.stat()
         out.append(CellRow(
             dataset=source.dataset,
-            cell_id=p.stem,
+            cell_id=_cell_id_from_path(p),
             nwb_path=p,
-            nwb_sha256=_sha256(p),
-            nwb_size=st.st_size,
-            nwb_mtime=st.st_mtime,
+            nwb_sha256=nwb_sha256(p),
+            nwb_size=nwb_size(p),
+            nwb_mtime=nwb_mtime(p),
         ))
     return out
+
+
+def _cell_id_from_path(p: Path) -> str:
+    """Stem of an NWB path. For Zarr (`cell.nwb.zarr`), strip both extensions."""
+    name = p.name
+    if name.endswith(".nwb.zarr"):
+        return name[: -len(".nwb.zarr")]
+    return p.stem
 
 
 def _rows_from_manifest_source(source: NWBSource, stats_list: list[ManifestSourceStats]) -> list[CellRow]:
@@ -196,22 +217,24 @@ def _rows_from_manifest_source(source: NWBSource, stats_list: list[ManifestSourc
                         source.dataset, e.nwb_path)
             continue
         stats.n_present_on_disk += 1
-        st = e.nwb_path.stat()
-        size_matches = (st.st_size == e.size_bytes) if e.size_bytes else False
-        mtime_matches = abs(st.st_mtime - e.mtime) <= MTIME_TOLERANCE_S if e.mtime else False
+        # Use NWB-aware stat helpers so Zarr directories work the same way as HDF5 files
+        on_disk_size = nwb_size(e.nwb_path)
+        on_disk_mtime = nwb_mtime(e.nwb_path)
+        size_matches = (on_disk_size == e.size_bytes) if e.size_bytes else False
+        mtime_matches = abs(on_disk_mtime - e.mtime) <= MTIME_TOLERANCE_S if e.mtime else False
         if source.reuse_sha256 and e.sha256 and size_matches and mtime_matches:
             sha = e.sha256
             stats.n_sha256_reused += 1
         else:
-            sha = _sha256(e.nwb_path)
+            sha = nwb_sha256(e.nwb_path)
             stats.n_sha256_recomputed += 1
         out.append(CellRow(
             dataset=source.dataset,
-            cell_id=e.nwb_path.stem,
+            cell_id=_cell_id_from_path(e.nwb_path),
             nwb_path=e.nwb_path,
             nwb_sha256=sha,
-            nwb_size=st.st_size,
-            nwb_mtime=st.st_mtime,
+            nwb_size=on_disk_size,
+            nwb_mtime=on_disk_mtime,
         ))
     stats_list.append(stats)
     return out
