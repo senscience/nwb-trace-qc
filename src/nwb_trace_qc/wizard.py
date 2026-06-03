@@ -108,7 +108,16 @@ def _stage_propose(root: Path, output_path: Path,
         _hr("═")
         click.echo(f"STAGE 2/5 · Propose config  →  {output_path}")
         _hr()
-        click.echo(output_path.read_text())
+        text = output_path.read_text()
+        if "⚠ UNMAPPED" in text:
+            click.secho(
+                "  ⚠ Some stimulus protocols in your NWBs aren't mapped to a family.\n"
+                "    Look for the 'UNMAPPED tokens' block below and edit\n"
+                "    stimulus_protocols: to slot them into the right families\n"
+                "    before accepting — otherwise qc_protocol_coverage will be\n"
+                "    False for every cell.",
+                fg="yellow")
+        click.echo(text)
         _hr()
         ans = _prompt_choice("review", ["accept", "edit", "quit"], default="a")
         if ans == "a":

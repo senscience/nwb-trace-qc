@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import sys
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,6 +66,108 @@ def _summarize_manifest_for_init(manifest_path: Path) -> tuple[int, int]:
         return n, total
     except Exception:
         return 0, 0
+
+
+def _sample_paths_for_source(s: dict, n_samples: int = 3) -> list[Path]:
+    """Return up to `n_samples` NWB paths from a `nwb_sources[i]` dict."""
+    from .nwb_io import is_nwb
+    out: list[Path] = []
+    if "manifest" in s:
+        try:
+            with open(s["manifest"]) as f:
+                data = json.load(f)
+        except Exception:
+            return out
+        for entry in (data.get("files") or []):
+            orig = entry.get("original_location") or ""
+            if not orig:
+                continue
+            p = Path(orig).expanduser()
+            if p.exists() and is_nwb(p):
+                out.append(p)
+            if len(out) >= n_samples:
+                break
+    elif "path" in s:
+        root = Path(s["path"])
+        glob = s.get("glob", "**/*.nwb")
+        for p in root.glob(glob):
+            if is_nwb(p):
+                out.append(p)
+            if len(out) >= n_samples:
+                break
+        # Pick up sibling Zarr stores when the glob targets files only
+        if len(out) < n_samples and ".nwb.zarr" not in glob:
+            zarr_glob = glob.replace("*.nwb", "*.nwb.zarr") if "*.nwb" in glob else f"{glob.rstrip('/')}/*.nwb.zarr"
+            for p in root.glob(zarr_glob):
+                if is_nwb(p):
+                    out.append(p)
+                if len(out) >= n_samples:
+                    break
+    return out
+
+
+def _sample_stimulus_tokens(sources: list[dict], n_per_source: int = 3) -> Counter:
+    """Open a few NWBs per source and return a Counter of the stimulus tokens
+    parsed by the same `name.split("__")[1]` rule the pipeline uses.
+
+    Returns an empty Counter on any IO failure — purely a hint, not a hard step.
+    """
+    from .nwb_io import open_nwb
+    tokens: Counter = Counter()
+    for s in sources:
+        for p in _sample_paths_for_source(s, n_per_source):
+            try:
+                with open_nwb(p) as f:
+                    for name in f.acquisition.keys():
+                        parts = name.split("__")
+                        stim = parts[1] if len(parts) >= 3 else name
+                        tokens[stim] += 1
+            except Exception:
+                continue
+    return tokens
+
+
+def _classify_tokens(tokens: Counter, families: dict[str, list[str]]) -> tuple[dict[str, Counter], Counter]:
+    """Split tokens into matched (per family) vs. unmatched against `families`.
+
+    Matching is case-insensitive, same as `StimulusFamilyMap`.
+    """
+    known_lc = {n.lower(): fam for fam, names in families.items() for n in names}
+    matched: dict[str, Counter] = defaultdict(Counter)
+    unmatched: Counter = Counter()
+    for tok, n in tokens.items():
+        fam = known_lc.get(tok.lower())
+        if fam:
+            matched[fam][tok] += n
+        else:
+            unmatched[tok] += n
+    return dict(matched), unmatched
+
+
+def _render_discovered_block(matched: dict[str, Counter], unmatched: Counter) -> str:
+    """Build the commented `# discovered:` / `# UNMAPPED:` block for the YAML header."""
+    if not matched and not unmatched:
+        return ""
+    lines: list[str] = ["#", "# Stimulus protocols discovered by sampling your NWBs:"]
+    for fam in sorted(matched):
+        toks = ", ".join(f"{t} ({n})" for t, n in matched[fam].most_common())
+        lines.append(f"#   {fam}: {toks}")
+    if unmatched:
+        essentials = {"spontaneous_hold", "test_pulse", "ap_waveform"}
+        missing_essentials = essentials - set(matched)
+        lines.append("#")
+        lines.append(f"# ⚠ UNMAPPED tokens ({len(unmatched)} unique, "
+                     f"{sum(unmatched.values())} sweeps in sampled NWBs):")
+        for tok, n in unmatched.most_common():
+            lines.append(f"#   {tok}  ({n} sweeps)")
+        lines.append("#")
+        lines.append("# Add these to the appropriate family under stimulus_protocols: below.")
+        if missing_essentials:
+            lines.append(f"# Heads-up: no protocols mapped to {sorted(missing_essentials)} —")
+            lines.append("# qc_protocol_coverage will be False for every cell until you assign")
+            lines.append("# at least one unmapped token to each essential family.")
+    lines.append("#\n")
+    return "\n".join(lines)
 
 
 def _build_starter_config(root_path: Path, *, name: str | None = None,
@@ -183,6 +286,12 @@ def _build_starter_config(root_path: Path, *, name: str | None = None,
         "cell_table": cell_table,
     }
 
+    # Sample a few NWBs per source to surface lab-specific stimulus protocols
+    # the LNMC/BBP default mapping doesn't cover.
+    sampled = _sample_stimulus_tokens(sources, n_per_source=3) if sources else Counter()
+    matched, unmatched = _classify_tokens(sampled, families)
+    discovered_block = _render_discovered_block(matched, unmatched)
+
     header = (
         f"# nwb-trace-qc project config — auto-generated\n"
         f"# Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
@@ -192,7 +301,8 @@ def _build_starter_config(root_path: Path, *, name: str | None = None,
         f"# Cell table detected: {'yes' if cell_table else 'no'}\n"
         f"#\n"
         f"# Review (a) stimulus_protocols if your lab uses non-LNMC names and\n"
-        f"#        (b) thresholds_file before running `nwb-qc run`.\n\n"
+        f"#        (b) thresholds_file before running `nwb-qc run`.\n"
+        f"{discovered_block}\n"
     )
     return header + yaml.safe_dump(cfg, sort_keys=False)
 
