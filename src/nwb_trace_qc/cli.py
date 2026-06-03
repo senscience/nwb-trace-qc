@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -66,11 +67,156 @@ def _summarize_manifest_for_init(manifest_path: Path) -> tuple[int, int]:
         return 0, 0
 
 
+def _build_starter_config(root_path: Path, *, name: str | None = None,
+                          guess_tables: bool = True,
+                          output_path: Path | None = None) -> str:
+    """Build a starter project YAML string for ROOT_PATH.
+
+    Returns the YAML text (with header comments) but does NOT write to disk.
+    The caller is responsible for `output_path.write_text(...)`. `output_path`
+    is used only to compute relative paths in the header (`Next:` hint).
+
+    Side effect: copies the bundled `default_thresholds.yaml` next to
+    `output_path` if a thresholds file isn't already there.
+    """
+    root_path = root_path.resolve()
+    name = (name or root_path.name).lower().replace(" ", "_")
+    if output_path is None:
+        cwd = Path.cwd()
+        out_dir = cwd / "configs" if (cwd / "configs").is_dir() else cwd
+        output_path = out_dir / f"{name}_project.yaml"
+
+    # 1. NWB sources
+    sources = []
+    top_level = [p for p in sorted(root_path.iterdir()) if p.is_dir()]
+    for sub in top_level:
+        mpath = _find_source_manifest(sub)
+        if mpath is not None:
+            sources.append({
+                "dataset": sub.name.lower(),
+                "manifest": str(mpath.resolve()),
+                "only_processed": False,
+            })
+            continue
+        nwb_hdf5 = [p for p in sub.rglob("*.nwb") if p.is_file()]
+        nwb_zarr = [p for p in sub.rglob("*.nwb.zarr") if p.is_dir()]
+        nwbs = nwb_hdf5 + nwb_zarr
+        if not nwbs: continue
+        rel_depths = {len(p.relative_to(sub).parts) for p in nwbs}
+        glob = "**/*.nwb" if max(rel_depths) > 1 else "*.nwb"
+        sources.append({
+            "dataset": sub.name.lower(),
+            "path": str(sub.resolve()),
+            "recursive": True,
+            "glob": glob,
+        })
+    root_nwbs = [p for p in root_path.glob("*.nwb") if p.is_file()] + \
+                [p for p in root_path.glob("*.nwb.zarr") if p.is_dir()]
+    if root_nwbs and not sources:
+        sources.append({
+            "dataset": name, "path": str(root_path), "recursive": False, "glob": "*.nwb"
+        })
+
+    # 2. Acquisition tables
+    tables = []
+    if guess_tables:
+        for pq_path in sorted(root_path.rglob("*.parquet")):
+            try:
+                schema = pq.read_schema(pq_path)
+                cols = set(schema.names)
+            except Exception:
+                continue
+            if "nwb_file" in cols and "stimulus_type" in cols:
+                try:
+                    sample = pq.read_table(pq_path, columns=["nwb_file"]).column("nwb_file").to_pylist()[:10]
+                except Exception:
+                    sample = []
+                column_map = {
+                    "stimulus_type": "stimulus_type",
+                    "rate_hz": "rate_hz" if "rate_hz" in cols else None,
+                    "n_samples": "n_samples" if "n_samples" in cols else None,
+                    "clamp_mode": "clamp_mode" if "clamp_mode" in cols else None,
+                    "sweep_number": "sweep_number" if "sweep_number" in cols else None,
+                }
+                tables.append({
+                    "path": str(pq_path.resolve()),
+                    "nwb_key_column": "nwb_file",
+                    "nwb_key_format": _detect_key_format(sample),
+                    "columns": {k: v for k, v in column_map.items() if v is not None},
+                })
+
+    # 3. Cell table
+    cell_table = None
+    for csv in sorted(root_path.glob("*.csv")):
+        try:
+            with open(csv) as f:
+                header = f.readline().strip().split(",")
+        except Exception:
+            continue
+        if "cell_id" in header:
+            ds_cols = [c for c in header if c.startswith("in_") and c not in {"in_"}]
+            cell_table = {
+                "path": str(csv.resolve()),
+                "cell_id_column": "cell_id",
+                "dataset_columns": ds_cols,
+            }
+            break
+
+    families = default_families()
+
+    pkg_default = Path(__file__).parent.parent.parent / "configs" / "default_thresholds.yaml"
+    thr_target = output_path.parent / f"{name}_thresholds.yaml"
+    if pkg_default.exists() and not thr_target.exists():
+        thr_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(pkg_default, thr_target)
+
+    output_dir = (output_path.parent / f"qc_output_{name}").resolve()
+
+    cfg = {
+        "project_name": name,
+        "output_dir": str(output_dir),
+        "nwb_sources": sources,
+        "acquisition_tables": tables,
+        "stimulus_protocols": families,
+        "thresholds_file": str(thr_target.resolve() if thr_target.exists() else thr_target),
+        "n_workers": max(1, (os.cpu_count() or 4) - 2),
+        "cell_table": cell_table,
+    }
+
+    header = (
+        f"# nwb-trace-qc project config — auto-generated\n"
+        f"# Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+        f"# Root path scanned: {root_path}\n"
+        f"# NWBs discovered: {sum(_count_source_nwbs(s) for s in sources)} across {len(sources)} source(s)\n"
+        f"# Acquisition parquets registered: {len(tables)}\n"
+        f"# Cell table detected: {'yes' if cell_table else 'no'}\n"
+        f"#\n"
+        f"# Review (a) stimulus_protocols if your lab uses non-LNMC names and\n"
+        f"#        (b) thresholds_file before running `nwb-qc run`.\n\n"
+    )
+    return header + yaml.safe_dump(cfg, sort_keys=False)
+
+
+def _setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
+                                            datefmt="%H:%M:%S"))
+    root = logging.getLogger()
+    # Avoid duplicating handlers when CLI is invoked multiple times in one process (tests)
+    root.handlers = [handler]
+    root.setLevel(level)
+
+
 @click.group()
 @click.version_option(__version__, prog_name="nwb-qc")
-def main():
+@click.option("--verbose", "-v", is_flag=True, help="Verbose (DEBUG) logging to stderr.")
+@click.pass_context
+def main(ctx: click.Context, verbose: bool):
     """Cohort-scale QC for patch-clamp NWB datasets."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    _setup_logging(verbose)
 
 
 @main.command("inspect")
@@ -96,6 +242,35 @@ def inspect_cmd(root_path: Path, output: Path | None, as_json: bool, no_write: b
     click.echo(f"\nFull inventory written to: {output}")
 
 
+@main.command("start")
+@click.argument("root_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--name", default=None, help="Project name. Default: root_path basename.")
+@click.option("--output", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Where to save the project YAML. Default: <name>_project.yaml in cwd (or configs/).")
+@click.option("--guess-tables/--no-guess-tables", default=True,
+              help="Scan for acquisition parquets under root_path (default ON).")
+@click.option("--with-vision/--no-vision", default=None,
+              help="Force the vision judge on/off for this run, overriding the config.")
+@click.option("--max-cost-usd", "max_cost_usd", type=float, default=None,
+              help="Soft cap on vision-judge spend for this run (USD).")
+def start_cmd(root_path: Path, name: str | None, output_path: Path | None,
+              guess_tables: bool, with_vision: bool | None, max_cost_usd: float | None):
+    """Guided wizard: inspect → propose config → dry-run → run → outcome."""
+    from .wizard import run_wizard
+    root_path = root_path.resolve()
+    name = (name or root_path.name).lower().replace(" ", "_")
+    if output_path is None:
+        cwd = Path.cwd()
+        out_dir = cwd / "configs" if (cwd / "configs").is_dir() else cwd
+        output_path = out_dir / f"{name}_project.yaml"
+    elif output_path.is_dir():
+        output_path = output_path / f"{name}_project.yaml"
+    code = run_wizard(root_path, output_path=output_path, name=name,
+                      guess_tables=guess_tables, with_vision=with_vision,
+                      max_cost_usd=max_cost_usd)
+    sys.exit(code)
+
+
 @main.command("init-config")
 @click.argument("root_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--name", "name", default=None, help="Project name. Default: root_path basename.")
@@ -107,146 +282,17 @@ def init_config(root_path: Path, name: str | None, output: Path | None, guess_ta
     """Auto-discover NWBs + parquets under ROOT_PATH and write a starter project YAML."""
     root_path = root_path.resolve()
     name = (name or root_path.name).lower().replace(" ", "_")
-    # Where to write
     if output is None:
         cwd = Path.cwd()
         out_dir = cwd / "configs" if (cwd / "configs").is_dir() else cwd
         output = out_dir / f"{name}_project.yaml"
     elif output.is_dir():
         output = output / f"{name}_project.yaml"
-
-    # 1. NWB sources: one per top-level subdir under root.
-    #
-    #    Preference order per subdir:
-    #      (a) source_material/source_manifest.json (wrangler manifest of source files)
-    #      (b) rglob("*.nwb") (directory tree)
-    #    Falls back to (b) if (a) is absent.
-    sources = []
-    top_level = [p for p in sorted(root_path.iterdir()) if p.is_dir()]
-    for sub in top_level:
-        # (a) Look for source_manifest.json — directly inside subdir, or one level
-        #     deeper (the common wrangler wrap-in-a-project-dir layout).
-        mpath = _find_source_manifest(sub)
-        if mpath is not None:
-            n_files, total_bytes = _summarize_manifest_for_init(mpath)
-            sources.append({
-                "dataset": sub.name.lower(),
-                "manifest": str(mpath.resolve()),
-                "only_processed": False,   # include all NWB entries; flip to true to restrict
-                                            # to files the wrangler directly processed
-            })
-            click.echo(
-                f"  auto-detected source_manifest.json in {sub.name}/ "
-                f"({n_files} files, {total_bytes / 1024**3:.2f} GB)"
-            )
-            continue
-        # (b) Directory tree — discover both HDF5 (*.nwb files) and Zarr (*.nwb.zarr dirs)
-        nwb_hdf5 = [p for p in sub.rglob("*.nwb") if p.is_file()]
-        nwb_zarr = [p for p in sub.rglob("*.nwb.zarr") if p.is_dir()]
-        nwbs = nwb_hdf5 + nwb_zarr
-        if not nwbs: continue
-        rel_depths = {len(p.relative_to(sub).parts) for p in nwbs}
-        glob = "**/*.nwb" if max(rel_depths) > 1 else "*.nwb"
-        sources.append({
-            "dataset": sub.name.lower(),
-            "path": str(sub.resolve()),
-            "recursive": True,
-            "glob": glob,
-        })
-    # Root has NWBs directly?
-    root_nwbs = [p for p in root_path.glob("*.nwb") if p.is_file()] + \
-                [p for p in root_path.glob("*.nwb.zarr") if p.is_dir()]
-    if root_nwbs and not sources:
-        sources.append({
-            "dataset": name, "path": str(root_path), "recursive": False, "glob": "*.nwb"
-        })
-
-    # 2. Acquisition tables: scan parquets under root_path
-    tables = []
-    if guess_tables:
-        for pq_path in sorted(root_path.rglob("*.parquet")):
-            try:
-                schema = pq.read_schema(pq_path)
-                cols = set(schema.names)
-            except Exception:
-                continue
-            if "nwb_file" in cols and "stimulus_type" in cols:
-                # Sample first values to detect key format
-                try:
-                    sample = pq.read_table(pq_path, columns=["nwb_file"]).column("nwb_file").to_pylist()[:10]
-                except Exception:
-                    sample = []
-                column_map = {
-                    "stimulus_type": "stimulus_type",
-                    "rate_hz": "rate_hz" if "rate_hz" in cols else None,
-                    "n_samples": "n_samples" if "n_samples" in cols else None,
-                    "clamp_mode": "clamp_mode" if "clamp_mode" in cols else None,
-                    "sweep_number": "sweep_number" if "sweep_number" in cols else None,
-                }
-                tables.append({
-                    "path": str(pq_path.resolve()),
-                    "nwb_key_column": "nwb_file",
-                    "nwb_key_format": _detect_key_format(sample),
-                    "columns": {k: v for k, v in column_map.items() if v is not None},
-                })
-
-    # 3. Cell table: any CSV in root_path with a cell_id column
-    cell_table = None
-    for csv in sorted(root_path.glob("*.csv")):
-        try:
-            with open(csv) as f:
-                header = f.readline().strip().split(",")
-        except Exception:
-            continue
-        if "cell_id" in header:
-            ds_cols = [c for c in header if c.startswith("in_") and c not in {"in_"}]
-            cell_table = {
-                "path": str(csv.resolve()),
-                "cell_id_column": "cell_id",
-                "dataset_columns": ds_cols,
-            }
-            break
-
-    # 4. Stimulus families (default LNMC/BBP)
-    families = default_families()
-
-    # 5. Thresholds: copy bundled defaults next to the project YAML
-    pkg_default = Path(__file__).parent.parent.parent / "configs" / "default_thresholds.yaml"
-    thr_target = output.parent / f"{name}_thresholds.yaml"
-    if pkg_default.exists() and not thr_target.exists():
-        shutil.copy(pkg_default, thr_target)
-
-    output_dir = (output.parent / f"qc_output_{name}").resolve()
-
-    cfg = {
-        "project_name": name,
-        "output_dir": str(output_dir),
-        "nwb_sources": sources,
-        "acquisition_tables": tables,
-        "stimulus_protocols": families,
-        "thresholds_file": str(thr_target.resolve() if thr_target.exists() else thr_target),
-        "n_workers": max(1, (os.cpu_count() or 4) - 2),
-        "cell_table": cell_table,
-    }
-
-    header = (
-        f"# nwb-trace-qc project config — auto-generated by `nwb-qc init-config`\n"
-        f"# Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
-        f"# Root path scanned: {root_path}\n"
-        f"# NWBs discovered: {sum(_count_source_nwbs(s) for s in sources)} across {len(sources)} source(s)\n"
-        f"# Acquisition parquets registered: {len(tables)}\n"
-        f"# Cell table detected: {'yes' if cell_table else 'no'}\n"
-        f"#\n"
-        f"# Review (a) stimulus_protocols if your lab uses non-LNMC names and\n"
-        f"#        (b) thresholds_file before running `nwb-qc run`.\n"
-        f"# Next: nwb-qc list-cells --config {output.name}\n\n"
-    )
+    yaml_text = _build_starter_config(root_path, name=name,
+                                       guess_tables=guess_tables, output_path=output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(header + yaml.safe_dump(cfg, sort_keys=False))
-
+    output.write_text(yaml_text)
     click.echo(f"Wrote {output}")
-    click.echo(f"      ({len(sources)} sources, {len(tables)} acquisition tables, "
-               f"thresholds at {thr_target.name})")
     click.echo(f"Next: nwb-qc list-cells --config {output}")
 
 
@@ -268,7 +314,6 @@ def list_cells(config_path: Path):
     click.echo(f"Acquisition tables registered: {len(cfg.acquisition_tables)}")
     if cfg.cell_table:
         click.echo(f"Cell table: {cfg.cell_table.path}")
-    # Manifest-source diagnostics
     stats = list(manifest.attrs.get("manifest_stats", []))
     if stats:
         click.echo("\nManifest-source diagnostics:")
@@ -297,7 +342,11 @@ def list_cells(config_path: Path):
 @click.option("--report-only", is_flag=True, help="Re-render report from cache without NWB I/O")
 @click.option("--with-vision/--no-vision", default=None,
               help="Force the vision judge on/off this run, overriding the config's vision_judge.enabled.")
-def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool, with_vision: bool | None):
+@click.option("--max-cost-usd", "max_cost_usd", type=float, default=None,
+              help="Soft cap on vision-judge spend for this run (USD). "
+                   "Overrides vision_judge.max_cost_usd from the config.")
+def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool,
+            with_vision: bool | None, max_cost_usd: float | None):
     """Run the full pipeline: discover → cache → compute → threshold → (vision) → override → report."""
     cfg = load_config(config_path)
     filter_ds = None
@@ -307,7 +356,8 @@ def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool, with_v
         filter_ds = filter_arg.split("=", 1)[1]
     if with_vision is not None:
         cfg.vision_judge.enabled = with_vision
-    result = pipeline_run(cfg, filter_dataset=filter_ds, report_only=report_only)
+    result = pipeline_run(cfg, filter_dataset=filter_ds, report_only=report_only,
+                          max_cost_usd=max_cost_usd)
     click.echo(json.dumps(result, indent=2, default=str))
     report = result.get("report")
     if report:

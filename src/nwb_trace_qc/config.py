@@ -62,13 +62,20 @@ class CellTable(BaseModel):
 
 
 class VisionJudgeConfig(BaseModel):
-    """Opt-in LLM vision-judge configuration. Off by default."""
+    """Opt-in LLM vision-judge configuration. Off by default.
+
+    `max_cost_usd` is a soft cap: the vision pass stops calling the provider once
+    the running estimated cost reaches this value. The pipeline still finishes
+    rendering the report with whatever vision verdicts were collected (un-judged
+    flag cells keep their rule-based verdict).
+    """
 
     enabled: bool = False
     provider: str = "anthropic"            # 'anthropic' | 'openai' | 'mock'
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-haiku-4-5"
     api_key_env: str = "ANTHROPIC_API_KEY"
     max_borderline_cells: int = 100
+    max_cost_usd: float = 1.0
     prompt_template: Path | None = None    # null = bundled default
     cache_responses: bool = True
 

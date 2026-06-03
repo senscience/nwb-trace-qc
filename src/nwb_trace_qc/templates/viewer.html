@@ -6,6 +6,7 @@
   header { background: #1b2228; color: #fff; padding: .5rem 1rem; display: flex; align-items: center; gap: 1rem; }
   header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
   header .meta { color: #aaa; font-size: .8rem; }
+  header .count { color: #ffe18a; font-size: .8rem; margin-left: auto; }
   main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 42px); }
   #left { background: #fff; border-right: 1px solid #e0e0e0; overflow-y: auto; }
   #left .filter { padding: .5rem; border-bottom: 1px solid #eee; position: sticky; top: 0; background: #fff; z-index: 2; }
@@ -18,19 +19,45 @@
   .v-pass { background: #d4edda; color: #155724; }
   .v-flag { background: #fff3cd; color: #856404; }
   .v-fail { background: #f8d7da; color: #721c24; }
-  #right { display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+  #right { display: grid; grid-template-rows: auto auto 1fr; overflow: hidden; }
   #cell-header { padding: .5rem 1rem; background: #fff; border-bottom: 1px solid #eee; font-size: .9rem; }
   #cell-header .cell-id { font-weight: 600; font-size: 1rem; }
   #cell-header .triggered { color: #666; font-size: .8rem; margin-top: .25rem; }
-  #content { display: grid; grid-template-columns: 220px 1fr; height: 100%; }
+  #metric-table { background: #fff; padding: .35rem 1rem; border-bottom: 1px solid #eee; font-size: .78rem; max-height: 80px; overflow-y: auto; }
+  #metric-table .row { display: inline-block; margin-right: 1.25rem; }
+  #metric-table .k { color: #666; }
+  #metric-table .v { font-weight: 600; }
+  #content { display: grid; grid-template-columns: 220px 1fr; min-height: 0; overflow: hidden; }
   #sweep-list { background: #fff; border-right: 1px solid #eee; overflow-y: auto; font-size: .8rem; }
   #sweep-list .family { padding: .3rem .5rem; background: #f4f6f8; font-weight: 600; font-size: .75rem; color: #666; position: sticky; top: 0; z-index: 1; }
   #sweep-list .sweep { padding: .25rem .5rem; cursor: pointer; border-bottom: 1px solid #f7f7f7; }
   #sweep-list .sweep:hover { background: #f4f6f8; }
   #sweep-list .sweep.selected { background: #e6f0ff; font-weight: 600; }
-  #plots { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: .5rem; padding: .5rem; background: #fafbfc; }
-  .panel { background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; padding: .4rem; position: relative; min-height: 180px; }
+  /* Fixed-size 2x2 plot grid: rows are content-sized (not 1fr), so panels
+     don't stretch with the viewport. Right pane scrolls if panels overflow. */
+  #plots {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-auto-rows: minmax(180px, 240px);
+    gap: .5rem;
+    padding: .5rem;
+    background: #fafbfc;
+    overflow: auto;
+    align-content: start;
+  }
+  .panel {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: .4rem;
+    position: relative;
+    height: 240px;
+    max-height: 240px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
   .panel.empty { border-style: dashed; color: #999; display: flex; align-items: center; justify-content: center; font-style: italic; }
+  .panel.loading { color: #888; display: flex; align-items: center; justify-content: center; font-style: italic; }
   .panel .title { font-size: .75rem; font-weight: 600; margin-bottom: .25rem; color: #444; }
   .panel .close { position: absolute; top: 4px; right: 6px; color: #999; cursor: pointer; font-size: .8rem; }
   .panel .close:hover { color: #c00; }
@@ -40,7 +67,8 @@
 </head><body>
 <header>
   <h1>{{PROJECT}} — interactive trace viewer</h1>
-  <span class="meta">click a cell on the left, then up to 4 sweeps on the right</span>
+  <span class="meta">flag cells (rule-based borderline) — click a cell, then up to 4 sweeps</span>
+  <span class="count" id="flag-count">{{N_FLAG}} flag of {{N_TOTAL}} total</span>
 </header>
 <main>
   <aside id="left">
@@ -50,7 +78,8 @@
     <ul id="cell-list"><li>loading…</li></ul>
   </aside>
   <section id="right">
-    <div id="cell-header"><span class="cell-id">select a cell</span></div>
+    <div id="cell-header"><span class="cell-id">select a flag cell on the left</span></div>
+    <div id="metric-table"></div>
     <div id="content">
       <aside id="sweep-list"></aside>
       <div id="plots">
@@ -63,50 +92,40 @@
   </section>
 </main>
 <script>
-let CELLS = [];          // [{cell_id, dataset, final_verdict, triggered, ...}]
+const MAX_POINTS = 1500;
+const SKIP_KEYS = new Set([
+  'cell_id','dataset','nwb_path','nwb_sha256',
+  'computed_verdict','final_verdict','triggered_metrics',
+  'override_note','override_reviewer','override_date',
+  'computed_verdict_with_vision','vision_reason',
+  'vision_verdict','vision_confidence','vision_notes',
+]);
+let CELLS = [];
 let activeCell = null;
-let sweepsCache = {};    // cell_id -> [sweep summaries]
-const slots = [null, null, null, null];   // {cell_id, sweep_idx, name, family} per slot
+let sweepsCache = {};
+const slots = [null, null, null, null];
 
 async function loadCells() {
-  const r = await fetch('/qc_report.csv');
-  const text = await r.text();
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  const headers = parseCSVLine(lines[0]);
-  CELLS = lines.slice(1).map(line => {
-    const fields = parseCSVLine(line);
-    const o = {};
-    headers.forEach((h, i) => o[h] = fields[i] || '');
-    return o;
-  });
+  try {
+    const r = await fetch('/api/cells');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const body = await r.json();
+    CELLS = body.cells || [];
+    document.getElementById('flag-count').textContent =
+      `${body.n_flag} flag of ${body.n_total} total`;
+  } catch (e) {
+    document.getElementById('cell-list').innerHTML = `<li class="empty-state">error loading cells: ${e}</li>`;
+    return;
+  }
   renderCellList();
 }
-function parseCSVLine(line) {
-  const out = [];
-  let cur = '', inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQ) {
-      if (c === '"' && line[i+1] === '"') { cur += '"'; i++; }
-      else if (c === '"') inQ = false;
-      else cur += c;
-    } else {
-      if (c === ',') { out.push(cur); cur = ''; }
-      else if (c === '"') inQ = true;
-      else cur += c;
-    }
-  }
-  out.push(cur);
-  return out;
-}
+
 function renderCellList() {
   const q = document.getElementById('cell-filter').value.toLowerCase();
   const ul = document.getElementById('cell-list');
   ul.innerHTML = '';
   const filtered = CELLS.filter(c => !q || (c.cell_id||'').toLowerCase().includes(q));
-  // sort: fail > flag > pass, then alpha
-  const order = {fail:0, flag:1, pass:2};
-  filtered.sort((a,b) => (order[a.final_verdict]||3) - (order[b.final_verdict]||3) || a.cell_id.localeCompare(b.cell_id));
+  filtered.sort((a, b) => (a.cell_id||'').localeCompare(b.cell_id||''));
   filtered.slice(0, 500).forEach(c => {
     const li = document.createElement('li');
     li.dataset.cellid = c.cell_id;
@@ -121,27 +140,47 @@ function renderCellList() {
     li.textContent = `…and ${filtered.length - 500} more (refine search)`;
     ul.appendChild(li);
   }
+  if (!filtered.length) {
+    ul.innerHTML = '<li class="empty-state">no flag cells</li>';
+  }
 }
+
+function renderMetricTable(row) {
+  const el = document.getElementById('metric-table');
+  if (!row) { el.innerHTML = ''; return; }
+  const parts = [];
+  for (const [k, v] of Object.entries(row)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (v === null || v === undefined || v === '' || (typeof v === 'number' && Number.isNaN(v))) continue;
+    let display = v;
+    if (typeof v === 'number') display = Math.abs(v) >= 100 ? v.toFixed(1) : v.toPrecision(4);
+    parts.push(`<span class="row"><span class="k">${k}:</span> <span class="v">${display}</span></span>`);
+  }
+  el.innerHTML = parts.join('') || '<span style="color:#888;font-style:italic">no metric values</span>';
+}
+
 async function selectCell(cellId) {
   activeCell = cellId;
   document.querySelectorAll('#cell-list li').forEach(li => li.classList.toggle('active', li.dataset.cellid === cellId));
   const row = CELLS.find(c => c.cell_id === cellId) || {};
-  document.querySelector('#cell-header .cell-id').textContent = cellId + ' · ' + (row.dataset||'');
-  let triggered = '';
-  try {
-    const arr = JSON.parse(row.triggered_metrics || '[]');
-    triggered = arr.map(t => `${t.metric} (${t.reason||t.verdict})`).join(', ');
-  } catch(_) {}
-  document.querySelector('#cell-header').innerHTML += `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no triggers'}</div>`;
-  // Force header to re-render cleanly
-  const h = document.querySelector('#cell-header');
-  h.innerHTML = `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${row.final_verdict}">${(row.final_verdict||'').toUpperCase()}</span></span><div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>`;
+  const triggered = Array.isArray(row.triggered_metrics)
+    ? row.triggered_metrics.map(t => `${t.metric} (${t.reason||t.verdict})`).join(', ')
+    : '';
+  const verdict = row.final_verdict || '';
+  document.querySelector('#cell-header').innerHTML =
+    `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
+    `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>`;
+  renderMetricTable(row);
 
-  // Load sweep list
+  // Show 4 loading panels immediately
+  for (let i = 0; i < 4; i++) showLoading(i);
+
+  // Load sweep list (cached on the server per nwb_sha256)
   if (!sweepsCache[cellId]) {
     const r = await fetch(`/api/sweeps/${encodeURIComponent(cellId)}`);
     if (!r.ok) {
       document.getElementById('sweep-list').innerHTML = `<div class="empty-state">error: ${r.status}</div>`;
+      for (let i = 0; i < 4; i++) clearSlot(i);
       return;
     }
     sweepsCache[cellId] = await r.json();
@@ -155,11 +194,15 @@ async function selectCell(cellId) {
       picks.push(s); seen.add(s.family);
     }
   }
+  // Fire all four fetches in parallel
+  const tasks = [];
   for (let i = 0; i < 4; i++) {
-    if (picks[i]) loadSweepIntoSlot(picks[i], i);
-    else clearSlot(i);
+    if (picks[i]) tasks.push(loadSweepIntoSlot(picks[i], i));
+    else { clearSlot(i); }
   }
+  await Promise.all(tasks);
 }
+
 function renderSweepList() {
   const sw = document.getElementById('sweep-list');
   sw.innerHTML = '';
@@ -185,6 +228,7 @@ function renderSweepList() {
   });
   highlightSelectedSweeps();
 }
+
 function highlightSelectedSweeps() {
   document.querySelectorAll('#sweep-list .sweep').forEach(el => {
     const idx = parseInt(el.dataset.idx, 10);
@@ -192,20 +236,38 @@ function highlightSelectedSweeps() {
     el.classList.toggle('selected', sel);
   });
 }
-async function loadSweepIntoSlot(sweep, slotIdx) {
-  const r = await fetch(`/api/trace/${encodeURIComponent(activeCell)}/${sweep.idx}?max_points=2500`);
-  if (!r.ok) return;
-  const data = await r.json();
-  slots[slotIdx] = { cell_id: activeCell, sweep_idx: sweep.idx, name: sweep.name, family: sweep.family };
-  highlightSelectedSweeps();
-  drawPanel(slotIdx, data, sweep);
+
+function showLoading(slotIdx) {
+  const panel = document.querySelectorAll('#plots .panel')[slotIdx];
+  panel.className = 'panel loading';
+  panel.innerHTML = `Loading sweep…`;
 }
+
+async function loadSweepIntoSlot(sweep, slotIdx) {
+  showLoading(slotIdx);
+  try {
+    const r = await fetch(`/api/trace/${encodeURIComponent(activeCell)}/${sweep.idx}?max_points=${MAX_POINTS}`);
+    if (!r.ok) {
+      clearSlot(slotIdx); return;
+    }
+    const data = await r.json();
+    slots[slotIdx] = { cell_id: activeCell, sweep_idx: sweep.idx, name: sweep.name, family: sweep.family };
+    highlightSelectedSweeps();
+    drawPanel(slotIdx, data, sweep);
+  } catch (e) {
+    const panel = document.querySelectorAll('#plots .panel')[slotIdx];
+    panel.className = 'panel empty';
+    panel.innerHTML = `error: ${e}`;
+  }
+}
+
 function clearSlot(slotIdx) {
   slots[slotIdx] = null;
   const panel = document.querySelectorAll('#plots .panel')[slotIdx];
   panel.innerHTML = `slot ${slotIdx+1}`; panel.className = 'panel empty';
   highlightSelectedSweeps();
 }
+
 function drawPanel(slotIdx, data, sweep) {
   const panel = document.querySelectorAll('#plots .panel')[slotIdx];
   panel.className = 'panel';
@@ -226,19 +288,16 @@ function drawPanel(slotIdx, data, sweep) {
   yMin -= pad; yMax += pad;
   const margin = {l: 35, r: 8, t: 4, b: 18};
   const innerW = w - margin.l - margin.r, innerH = h - margin.t - margin.b;
-  // Axes
   ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(margin.l, margin.t); ctx.lineTo(margin.l, margin.t + innerH);
   ctx.lineTo(margin.l + innerW, margin.t + innerH); ctx.stroke();
-  // 0 mV reference line
   if (yMin < 0 && yMax > 0) {
     const y0 = margin.t + innerH * (1 - (0 - yMin) / (yMax - yMin));
     ctx.strokeStyle = '#cce'; ctx.setLineDash([3,3]);
     ctx.beginPath(); ctx.moveTo(margin.l, y0); ctx.lineTo(margin.l + innerW, y0); ctx.stroke();
     ctx.setLineDash([]);
   }
-  // Trace
   ctx.strokeStyle = '#222'; ctx.lineWidth = 0.8;
   ctx.beginPath();
   for (let i = 0; i < xs.length; i++) {
@@ -247,7 +306,6 @@ function drawPanel(slotIdx, data, sweep) {
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  // Y-axis labels (min, max)
   ctx.fillStyle = '#666'; ctx.font = '10px monospace';
   ctx.textAlign = 'right'; ctx.fillText(yMax.toFixed(0)+'mV', margin.l-3, margin.t+9);
   ctx.fillText(yMin.toFixed(0)+'mV', margin.l-3, margin.t+innerH);
@@ -255,15 +313,20 @@ function drawPanel(slotIdx, data, sweep) {
   ctx.fillText(xMin.toFixed(2)+'s', margin.l, margin.t+innerH+12);
   ctx.fillText(xMax.toFixed(2)+'s', margin.l+innerW, margin.t+innerH+12);
 }
+
 document.getElementById('cell-filter').addEventListener('input', renderCellList);
+let _resizeTimer = null;
 window.addEventListener('resize', () => {
-  // Redraw active slots
-  slots.forEach((s, i) => {
-    if (s) {
-      fetch(`/api/trace/${encodeURIComponent(s.cell_id)}/${s.sweep_idx}?max_points=2500`)
-        .then(r => r.json()).then(d => drawPanel(i, d, s));
-    }
-  });
+  // Debounce + redraw active slots from cached x/y in-DOM data (re-fetch is wasteful).
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    slots.forEach((s, i) => {
+      if (s) {
+        fetch(`/api/trace/${encodeURIComponent(s.cell_id)}/${s.sweep_idx}?max_points=${MAX_POINTS}`)
+          .then(r => r.json()).then(d => drawPanel(i, d, s));
+      }
+    });
+  }, 200);
 });
 loadCells();
 </script>

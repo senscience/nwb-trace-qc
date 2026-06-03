@@ -4,6 +4,11 @@ Off by default. Three providers: 'anthropic', 'openai', 'mock' (deterministic, n
 Reuses already-rendered thumbnail PNGs (no separate rendering pass). Caches responses
 keyed by (nwb_sha256, pipeline_version, prompt_hash) inside the same cache parquet,
 so re-runs over the same data + same prompt are free.
+
+Each provider call returns (verdict_dict, usage_dict). `usage_dict` carries
+`tokens_in`, `tokens_out`, and `estimated_usd` (or None if the model isn't priced).
+`run_vision_pass` aggregates these and short-circuits when the running cost reaches
+`cfg.max_cost_usd` (soft cap).
 """
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +31,46 @@ log = logging.getLogger(__name__)
 # Hard input cap regardless of config (sanity)
 _HARD_MAX_CELLS = 500
 _VERDICTS = {"pass", "flag", "fail"}
+
+
+# USD per million tokens, (in, out). Keep prefix-matchable model ids so model
+# names with suffixes/dates still resolve (e.g. "claude-sonnet-4-5-20260101").
+# Unknown models → estimated_usd is None.
+_PRICES_PER_MTOK: list[tuple[str, float, float]] = [
+    # Anthropic
+    ("claude-opus-4-8",    15.00, 75.00),
+    ("claude-opus-4-7",    15.00, 75.00),
+    ("claude-opus-4",      15.00, 75.00),
+    ("claude-sonnet-4-6",   3.00, 15.00),
+    ("claude-sonnet-4-5",   3.00, 15.00),
+    ("claude-sonnet-4",     3.00, 15.00),
+    ("claude-haiku-4-5",    1.00,  5.00),
+    ("claude-haiku-4",      1.00,  5.00),
+    # OpenAI (best-effort; suffix-matched)
+    ("gpt-4o-mini",         0.15,  0.60),
+    ("gpt-4o",              2.50, 10.00),
+    ("gpt-4-turbo",        10.00, 30.00),
+    ("gpt-4",              30.00, 60.00),
+    # Mock provider — zero cost so tests are deterministic
+    ("mock",                0.00,  0.00),
+]
+
+
+def _price_lookup(model: str) -> tuple[float, float] | None:
+    """Best-effort prefix match of a model name to (in_per_mtok, out_per_mtok)."""
+    model = (model or "").lower()
+    for key, p_in, p_out in _PRICES_PER_MTOK:
+        if model.startswith(key):
+            return p_in, p_out
+    return None
+
+
+def estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float | None:
+    p = _price_lookup(model)
+    if p is None:
+        return None
+    p_in, p_out = p
+    return (tokens_in * p_in + tokens_out * p_out) / 1_000_000.0
 
 
 @dataclass
@@ -44,7 +89,6 @@ class VisionVerdict:
 
 def load_prompt_template(path: Path | None) -> str:
     if path is None:
-        # Bundled default
         path = Path(__file__).parent / "templates" / "vision_prompt.md"
     with open(path) as f:
         return f.read()
@@ -55,7 +99,6 @@ def prompt_hash(template: str) -> str:
 
 
 def _format_prompt(template: str, metrics: dict[str, Any]) -> str:
-    # Build a one-per-line metric snapshot, skipping NaNs / None
     lines = []
     keep = ["vrest_mv", "rs_mohm_final", "rs_drift_pct", "ap_amp_overshoot_mv",
             "ap_threshold_drift_mv", "baseline_rms_mv", "rac_decay_residual_rel",
@@ -82,10 +125,6 @@ def _format_prompt(template: str, metrics: dict[str, Any]) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def select_borderline_cells(verdicts_df: pd.DataFrame, max_cells: int) -> pd.DataFrame:
-    """Return the subset of cells whose rule-based verdict is `flag`, capped to max_cells.
-
-    Selection order = manifest order (the caller passes verdicts_df already ordered).
-    """
     if "computed_verdict" not in verdicts_df.columns:
         return verdicts_df.head(0)
     flag = verdicts_df[verdicts_df["computed_verdict"] == "flag"].copy()
@@ -105,13 +144,8 @@ def _png_to_b64(p: Path) -> str:
 
 
 def _parse_response(text: str) -> dict[str, Any]:
-    """Extract a valid JSON object from a model response.
-
-    Strategy: find the first {...} that parses. If anything fails, return a fallback.
-    """
     if not text:
         return {"verdict": "flag", "confidence": 0.0, "notes": "empty response"}
-    # Best-effort: pull the first JSON object
     m = re.search(r"\{.*?\}", text, re.S)
     if not m:
         return {"verdict": "flag", "confidence": 0.0, "notes": "unparseable response"}
@@ -131,7 +165,7 @@ def _parse_response(text: str) -> dict[str, Any]:
     return {"verdict": v, "confidence": c, "notes": notes}
 
 
-def _call_anthropic(prompt: str, images: list[Path], model: str, api_key: str) -> dict[str, Any]:
+def _call_anthropic(prompt: str, images: list[Path], model: str, api_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         import anthropic
     except ImportError as e:
@@ -154,10 +188,16 @@ def _call_anthropic(prompt: str, images: list[Path], model: str, api_key: str) -
         for blk in resp.content:
             if getattr(blk, "type", None) == "text":
                 text += blk.text
-    return _parse_response(text)
+    usage = getattr(resp, "usage", None)
+    tin = int(getattr(usage, "input_tokens", 0) or 0)
+    tout = int(getattr(usage, "output_tokens", 0) or 0)
+    return _parse_response(text), {
+        "tokens_in": tin, "tokens_out": tout,
+        "estimated_usd": estimate_cost_usd(model, tin, tout),
+    }
 
 
-def _call_openai(prompt: str, images: list[Path], model: str, api_key: str) -> dict[str, Any]:
+def _call_openai(prompt: str, images: list[Path], model: str, api_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         import openai
     except ImportError as e:
@@ -175,18 +215,31 @@ def _call_openai(prompt: str, images: list[Path], model: str, api_key: str) -> d
         messages=[{"role": "user", "content": parts}],
     )
     text = resp.choices[0].message.content if resp.choices else ""
-    return _parse_response(text or "")
+    usage = getattr(resp, "usage", None)
+    tin = int(getattr(usage, "prompt_tokens", 0) or 0)
+    tout = int(getattr(usage, "completion_tokens", 0) or 0)
+    return _parse_response(text or ""), {
+        "tokens_in": tin, "tokens_out": tout,
+        "estimated_usd": estimate_cost_usd(model, tin, tout),
+    }
 
 
-def _call_mock(prompt: str, images: list[Path], model: str, api_key: str) -> dict[str, Any]:
-    """Deterministic mock for tests: returns 'flag' with the cell-id-ish fingerprint
-    encoded into the notes so test assertions can pattern-match. Never makes a network call.
+def _call_mock(prompt: str, images: list[Path], model: str, api_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Deterministic mock: returns 'flag' verdict + a fixed usage block so tests can
+    assert telemetry plumbing without a network call.
     """
     fingerprint = ",".join(img.name for img in images)[:80]
-    return {
+    verdict = {
         "verdict": "flag",
         "confidence": 0.5,
         "notes": f"mock provider; prompt_len={len(prompt)}; images=[{fingerprint}]",
+    }
+    # Fixed deterministic token counts so soft-cap tests can pick a budget
+    # that allows exactly N calls before stopping.
+    tin, tout = 100, 20
+    return verdict, {
+        "tokens_in": tin, "tokens_out": tout,
+        "estimated_usd": estimate_cost_usd(model or "mock", tin, tout),
     }
 
 
@@ -211,10 +264,8 @@ def run_vision_pass(
 ) -> tuple[list[VisionVerdict], dict[str, Any]]:
     """Run the vision judge against borderline cells, returning (verdicts, stats).
 
-    `metrics_by_sha`: nwb_sha256 → metric dict (so we don't have to look up by cell_id).
-    `thumbnails`: cell_id → list of PNG paths.
-    `cached_responses`: DataFrame with columns [nwb_sha256, pipeline_version, prompt_hash,
-                       vision_verdict, vision_confidence, vision_notes], or None.
+    Stops calling the provider once running `estimated_usd` would exceed
+    `cfg.max_cost_usd` (soft cap). Cached entries don't count against the budget.
     """
     if not cfg.enabled:
         return [], {"enabled": False}
@@ -233,7 +284,6 @@ def run_vision_pass(
             log.warning("vision: %s not set; skipping vision pass", cfg.api_key_env)
             return [], {"enabled": True, "skipped_reason": f"{cfg.api_key_env} not set"}
 
-    # Build a fast cache lookup
     cache_key_to_row: dict[tuple[str, str], dict[str, Any]] = {}
     if cached_responses is not None and not cached_responses.empty:
         for _, r in cached_responses.iterrows():
@@ -241,11 +291,20 @@ def run_vision_pass(
 
     selected = select_borderline_cells(verdicts_df, cfg.max_borderline_cells)
     out: list[VisionVerdict] = []
-    stats = {
+    total_tokens_in = 0
+    total_tokens_out = 0
+    total_cost_usd = 0.0
+    cost_unknown = False
+    stats: dict[str, Any] = {
         "enabled": True, "provider": cfg.provider, "model": cfg.model,
         "n_borderline": int(len(selected)),
         "n_cached": 0, "n_called": 0, "n_errors": 0,
+        "tokens_in": 0, "tokens_out": 0,
+        "estimated_usd": 0.0,
+        "max_cost_usd": float(getattr(cfg, "max_cost_usd", 0.0) or 0.0),
+        "stopped_by_budget": False,
     }
+    max_cost = float(getattr(cfg, "max_cost_usd", 0.0) or 0.0)
 
     for r in selected.itertuples(index=False):
         sha = r.nwb_sha256
@@ -266,13 +325,26 @@ def run_vision_pass(
         if not imgs:
             log.info("vision: %s has no thumbnails; skipping", cell_id)
             continue
+        # Soft budget check BEFORE the next call
+        if max_cost > 0 and total_cost_usd >= max_cost:
+            log.warning("vision: soft cap reached (%.4f >= %.4f USD); stopping",
+                        total_cost_usd, max_cost)
+            stats["stopped_by_budget"] = True
+            break
         prompt = _format_prompt(template, metrics_by_sha.get(sha, {}))
         try:
-            resp = provider_fn(prompt, imgs, cfg.model, api_key)
+            resp, usage = provider_fn(prompt, imgs, cfg.model, api_key)
         except Exception as e:  # noqa: BLE001
             log.warning("vision call failed for %s: %s", cell_id, e)
             stats["n_errors"] += 1
             continue
+        total_tokens_in += int(usage.get("tokens_in", 0) or 0)
+        total_tokens_out += int(usage.get("tokens_out", 0) or 0)
+        call_usd = usage.get("estimated_usd")
+        if call_usd is None:
+            cost_unknown = True
+        else:
+            total_cost_usd += float(call_usd)
         out.append(VisionVerdict(
             cell_id=cell_id,
             verdict=resp["verdict"],
@@ -283,6 +355,9 @@ def run_vision_pass(
         ))
         stats["n_called"] += 1
 
+    stats["tokens_in"] = int(total_tokens_in)
+    stats["tokens_out"] = int(total_tokens_out)
+    stats["estimated_usd"] = None if cost_unknown else round(total_cost_usd, 6)
     return out, stats
 
 
@@ -290,14 +365,11 @@ def apply_vision_verdicts(verdicts_df: pd.DataFrame,
                           vision_verdicts: list[VisionVerdict]) -> pd.DataFrame:
     """Integrate vision verdicts into the per-cell verdicts DataFrame.
 
-    Precedence (the human-override step happens *after* this in pipeline.run):
+    Precedence:
       - rules `fail` → final `fail` (vision can't downgrade)
       - rules `flag` + vision `fail` → final `fail` ("vision_escalated")
       - rules `flag` + vision `pass` → final stays `flag` ("vision_suggests_pass")
       - otherwise → final = computed verdict
-
-    Adds columns: vision_verdict, vision_confidence, vision_notes,
-                  computed_verdict_with_vision, vision_reason.
     """
     df = verdicts_df.copy()
     by_cell = {v.cell_id: v for v in vision_verdicts}
@@ -319,6 +391,5 @@ def apply_vision_verdicts(verdicts_df: pd.DataFrame,
             new_verdicts.append(rule); reasons.append("")
     df["computed_verdict_with_vision"] = new_verdicts
     df["vision_reason"] = reasons
-    # The downstream override layer reads `computed_verdict`; swap it in
     df["computed_verdict"] = new_verdicts
     return df

@@ -17,7 +17,29 @@ pip install -e /path/to/nwb-trace-qc        # editable install of the repo
 nwb-qc --version
 ```
 
-**Check before moving on:** `nwb-qc --help` lists the subcommands `inspect`, `init-config`, `list-cells`, `run`, `report`, `thresholds`, and `serve`.
+**Check before moving on:** `nwb-qc --help` lists the subcommands `inspect`, `init-config`, `list-cells`, `run`, `report`, `thresholds`, `serve`, and `start`.
+
+---
+
+## Step 0.1 — Quickest path: the guided wizard
+
+If you'd rather walk through the whole flow once with prompts between each step instead of running four commands by hand, use:
+
+```bash
+nwb-qc start /path/to/your/data
+```
+
+This walks you through five stages, pausing for confirmation between each:
+
+1. **Inspect** — prints the inventory (same as `nwb-qc inspect`). `[Enter]` to continue.
+2. **Propose config** — generates the project YAML and shows it on screen. `[a]ccept`, `[e]dit` in `$EDITOR`, or `[q]uit`.
+3. **Dry-run** — shows which NWBs were discovered and how many will be processed. `[r]un`, `[b]ack` to re-edit the config, or `[q]uit`.
+4. **Run** — executes the pipeline with a live `[stage 2/6 metric-compute] 142/2302 cells …  ETA 28m` progress line.
+5. **Outcome** — prints the report paths and offers `[o]pen` the report or `[s]erve` the interactive viewer.
+
+Every step is reversible; nothing is committed to disk until you accept the config in step 2. After the run, every project artefact is exactly the same as if you'd run `init-config` / `list-cells` / `run` separately, so you can keep iterating with those commands afterward.
+
+Pass `--max-cost-usd 0.50` (or any number) to cap the vision-judge spend for this run, and `-v` / `--verbose` on the top-level group to see DEBUG-level logs on stderr.
 
 ---
 
@@ -188,9 +210,12 @@ nwb-qc run --config mydata_project.yaml
   "elapsed_s": 1842.3,
   "report": "/path/to/qc_output_mydata/qc_report.html",
   "viewer": "/path/to/qc_output_mydata/qc_viewer.html",
+  "run_report": "/path/to/qc_output_mydata/run_report.json",
   "vision": {"enabled": false}
 }
 ```
+
+**`run_report.json`** is the structured per-run record. Per-stage timing, LLM token spend, peak memory, manifest-source diagnostics, and the catalogue of any `compute_error`s land in this file every run, so you can diff successive runs and track regressions. Schema (top-level keys): `started_at` / `finished_at` / `elapsed_s`, `stages.{manifest_build, metric_compute, thresholds, thumbnails, vision, overrides, report}`, `verdicts`, `memory.peak_rss_mb`, `system`, `manifest_stats`, `compute_errors`.
 
 **Tip — smoke-test first.** If your cohort is large, run on a single dataset first to validate thresholds before committing to the full run:
 
@@ -308,9 +333,10 @@ export OPENAI_API_KEY=sk-...
 vision_judge:
   enabled: true
   provider: anthropic              # 'anthropic' | 'openai' | 'mock'
-  model: claude-sonnet-4-5
+  model: claude-haiku-4-5          # default; opt up to sonnet/opus per-project
   api_key_env: ANTHROPIC_API_KEY
   max_borderline_cells: 100
+  max_cost_usd: 1.0                # soft cap; stops vision pass when reached
   prompt_template: null            # null = bundled default
   cache_responses: true
 ```
@@ -318,8 +344,10 @@ vision_judge:
 **Or one-shot via flag:**
 
 ```bash
-nwb-qc run --config mydata_project.yaml --with-vision
+nwb-qc run --config mydata_project.yaml --with-vision --max-cost-usd 0.50
 ```
+
+The default model is the cheaper Haiku tier; you can opt up by editing your YAML. `max_cost_usd` is a **soft cap**: the pipeline stops calling the vision provider as soon as the running estimated cost reaches the cap, then continues to render the report with whatever vision verdicts were already collected. Un-judged borderline cells keep their rule-based `flag` verdict (no errors). Per-run spend, token totals, and whether the cap was hit are recorded under `stages.vision` in `run_report.json`.
 
 **Verdict precedence (each later step wins over the previous):**
 
@@ -354,13 +382,15 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 
 | Command | What it does |
 |---|---|
+| `nwb-qc start <root>` | Guided wizard: inspect → propose config → dry-run → run → outcome, with a confirm prompt at each step. See Step 0.1. |
 | `nwb-qc inspect <root>` | Read-only inventory of a wrangler-output tree (NWB counts, parquet schemas, fair2.json / README / run_state summaries, per-parquet QC-eligibility check). See Step 0.5. |
 | `nwb-qc init-config <root>` | Auto-discover NWBs + parquets and write a starter project YAML and per-project thresholds YAML. |
 | `nwb-qc list-cells --config <file>` | Dry-run: print discovered NWBs, dedup info, and which cells map to which dataset. |
-| `nwb-qc run --config <file> [--filter dataset=X] [--with-vision/--no-vision] [--report-only]` | Full pipeline. |
+| `nwb-qc run --config <file> [--filter dataset=X] [--with-vision/--no-vision] [--max-cost-usd N] [--report-only]` | Full pipeline. |
 | `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without NWB I/O. |
 | `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (counts only). |
-| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer. |
+| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer — restricted to `flag` cells only; pass/fail rows stay in `qc_report.csv`. |
+| `nwb-qc -v <subcmd>` | DEBUG-level logging on stderr. |
 | `nwb-qc --version` | Print the package version. |
 
 ---

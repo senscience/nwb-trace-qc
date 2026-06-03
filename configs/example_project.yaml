@@ -73,8 +73,12 @@ cell_table:
 vision_judge:
   enabled: false
   provider: anthropic              # 'anthropic' | 'openai' | 'mock'
-  model: claude-sonnet-4-5
+  model: claude-haiku-4-5          # cheapest tier; opt up to sonnet/opus per project
   api_key_env: ANTHROPIC_API_KEY
-  max_borderline_cells: 100        # hard cap to bound cost
+  max_borderline_cells: 100        # hard cap on cell count sent to the model
+  max_cost_usd: 1.0                # soft cap on per-run spend (USD). Pipeline stops
+                                   # calling the model when running cost reaches this
+                                   # value and finishes rendering with what it already
+                                   # collected. Override per-run with `--max-cost-usd`.
   prompt_template: null            # null = bundled default; or a path to your own
   cache_responses: true
