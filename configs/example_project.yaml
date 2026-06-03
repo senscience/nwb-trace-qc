@@ -53,3 +53,16 @@ cell_table:
   path: /data/my_cells.csv
   cell_id_column: cell_id
   dataset_columns: [in_cohort_a, in_cohort_b]
+
+# 7. (Optional) LLM vision-judge — off by default. When enabled, only `flag`-verdict cells
+#    are sent to a vision model for a second opinion. Cells that already clearly pass or
+#    fail by the numeric rules are not escalated. Vision can only escalate flag→fail; it
+#    cannot downgrade a fail or auto-pass a flag.
+vision_judge:
+  enabled: false
+  provider: anthropic              # 'anthropic' | 'openai' | 'mock'
+  model: claude-sonnet-4-5
+  api_key_env: ANTHROPIC_API_KEY
+  max_borderline_cells: 100        # hard cap to bound cost
+  prompt_template: null            # null = bundled default; or a path to your own
+  cache_responses: true

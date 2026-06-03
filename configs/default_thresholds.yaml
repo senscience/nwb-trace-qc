@@ -44,3 +44,33 @@ n_sweeps_nan:
 
 qc_protocol_coverage:
   fail_if_false: true
+
+# ────────────────────────────────────────────────────────────
+# Visual-defect metrics (v0.2.0)
+# These catch patterns the scalar metrics above miss:
+#   - rac_decay_residual_rel    : glitchy / ringing test-pulse recovery
+#   - vm_drift_within_sweep     : drifting seal (within-sweep Vm slope, mV/s)
+#   - ap_failure_fraction       : initiated spikes that don't reach overshoot
+#   - ap_amp_cv                 : inconsistent AP amplitudes in a train
+#   - late_instability_index    : orderly firing degrading to oscillation late in a long sweep
+# ────────────────────────────────────────────────────────────
+
+rac_decay_residual_rel:
+  flag_above: 0.15
+  fail_above: 0.30
+
+vm_drift_within_sweep_mv_per_s:
+  flag_above: 2.0
+  fail_above: 5.0
+
+ap_failure_fraction:
+  flag_above: 0.10
+  fail_above: 0.25
+
+ap_amp_cv:
+  flag_above: 0.20
+  fail_above: 0.40
+
+late_instability_index:
+  flag_above: 1.0
+  fail_above: 3.0

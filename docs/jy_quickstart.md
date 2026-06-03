@@ -32,6 +32,20 @@ After the first full run, edits to `configs/default_thresholds.yaml` or `qc_outp
 - 35 MB self-contained HTML report at `qc_output_jy/qc_report.html`, 0 external resources.
 - 1,182 trace thumbnails generated for non-pass cells (25 MB).
 
+## Pipeline v0.2.0 (visual-defect metrics + vision judge + interactive viewer)
+
+The 0.2.0 bump invalidates the per-NWB cache and recomputes everything; the next full JY run will pick up the five new visual-defect metrics:
+
+- `rac_decay_residual_rel` — glitchy / ringing test-pulse recovery
+- `vm_drift_within_sweep_mv_per_s` — within-sweep Vm slope (drifting seal)
+- `ap_failure_fraction` — initiated spikes that don't reach overshoot
+- `ap_amp_cv` — AP-amplitude inconsistency within a train
+- `late_instability_index` — orderly firing degrading to oscillation late in a long sweep
+
+RN smoke run on 0.2.0 (32 cells, 45 s wall-clock): the new metrics had non-trivial coverage (`rac_decay_residual_rel` on 22 of 32 cells, `vm_drift_within_sweep_mv_per_s` on 21, `ap_failure_fraction` on 19, `ap_amp_cv` on 14, `late_instability_index` on 5). The reduced cohort moved from 3-6-23 (pass-flag-fail) on 0.1.0 to 0-5-27 on 0.2.0 — the new metrics flagged a few cells previously passing.
+
+Vision judge is off by default; enable with `--with-vision` once you've set `ANTHROPIC_API_KEY`. Interactive viewer is one command: `nwb-qc serve --config configs/jy_project.yaml`.
+
 ## Known cohort-specific tuning opportunities
 
 The inaugural defaults flag many cells for two diagnosable cohort-specific reasons; these are notes for future threshold tweaks, not pipeline bugs.

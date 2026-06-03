@@ -24,6 +24,7 @@ from .overrides import apply_overrides, init_overrides_file, load_overrides
 from .report import write_report
 from .stimuli import StimulusFamilyMap
 from .thresholds import evaluate, load_thresholds
+from . import vision as _vision
 
 
 def _compute_one(args):
@@ -150,21 +151,20 @@ def run(cfg: ProjectConfig, *, filter_dataset: str | None = None, report_only: b
                 "vrest_mv","vrest_drift_mv","rs_mohm_initial","rs_mohm_final","rs_drift_pct",
                 "rin_mohm","ap_amp_overshoot_mv","ap_threshold_drift_mv","baseline_rms_mv",
                 "n_sweeps_total","n_sweeps_clipped","n_sweeps_nan","qc_protocol_coverage",
+                "rac_decay_residual_rel","vm_drift_within_sweep_mv_per_s",
+                "ap_failure_fraction","ap_amp_cv","late_instability_index",
                 "compute_error",
             ]},
         })
     verdicts = pd.DataFrame(rows)
 
-    # Stage 4: apply human overrides
-    overrides = load_overrides(cfg.overrides_path)
-    final = apply_overrides(verdicts, overrides)
-
-    # Stage 5: thumbnails for non-pass cells (cached per-sha256 to avoid rework)
+    # Stage 3.5: thumbnails for non-pass cells (cached per-sha256 to avoid rework).
+    # We render now so the optional vision pass can reuse them.
     thumbs: dict[str, list[Path]] = {}
     cfg.thumbnails_dir.mkdir(parents=True, exist_ok=True)
     seen_for_sha: dict[str, list[Path]] = {}
-    for r in final.itertuples(index=False):
-        if r.final_verdict == "pass":
+    for r in verdicts.itertuples(index=False):
+        if r.computed_verdict == "pass":
             continue
         sha8 = r.nwb_sha256[:8]
         if r.nwb_sha256 in seen_for_sha:
@@ -178,13 +178,40 @@ def run(cfg: ProjectConfig, *, filter_dataset: str | None = None, report_only: b
             seen_for_sha[r.nwb_sha256] = [out]
             thumbs[r.cell_id] = [out]
 
-    # Stage 6: render report
+    # Stage 3.7: optional vision judge for borderline (flag) cells.
+    vision_stats: dict = {"enabled": False}
+    if cfg.vision_judge and cfg.vision_judge.enabled:
+        metrics_by_sha = {r.nwb_sha256: cache_df[cache_df["nwb_sha256"] == r.nwb_sha256].iloc[0].to_dict()
+                          for r in verdicts.itertuples(index=False)
+                          if r.nwb_sha256 in set(cache_df["nwb_sha256"])}
+        cached_responses = None  # not yet wired into the cache parquet; the vision call cache lives inside vision.py per-process for now
+        vverdicts, vision_stats = _vision.run_vision_pass(
+            verdicts_df=verdicts,
+            metrics_by_sha=metrics_by_sha,
+            thumbnails=thumbs,
+            cfg=cfg.vision_judge,
+            cached_responses=cached_responses,
+        )
+        if vverdicts:
+            verdicts = _vision.apply_vision_verdicts(verdicts, vverdicts)
+
+    # Stage 4: apply human overrides (always last; human wins)
+    overrides = load_overrides(cfg.overrides_path)
+    final = apply_overrides(verdicts, overrides)
+
+    # Stage 6: render report (static HTML + CSV)
     write_report(final, thumbs,
                  html_path=cfg.report_html,
                  csv_path=cfg.report_csv,
                  project_name=cfg.project_name,
                  pipeline_version=PIPELINE_VERSION,
                  thresholds_fp=str(cfg.thresholds_file))
+
+    # Stage 7: write the viewer.html template into the output dir so `nwb-qc serve` works
+    viewer_src = Path(__file__).parent / "templates" / "viewer.html"
+    if viewer_src.exists():
+        viewer_dst = cfg.report_html.parent / "qc_viewer.html"
+        viewer_dst.write_text(viewer_src.read_text())
 
     return {
         "n_cells": int(len(final)),
@@ -196,4 +223,6 @@ def run(cfg: ProjectConfig, *, filter_dataset: str | None = None, report_only: b
         "n_fail": int((final["final_verdict"] == "fail").sum()),
         "elapsed_s": round(time.time() - t0, 2),
         "report": str(cfg.report_html),
+        "viewer": str(cfg.report_html.parent / "qc_viewer.html"),
+        "vision": vision_stats,
     }

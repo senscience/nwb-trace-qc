@@ -49,6 +49,8 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
     """
     metric_columns = metric_columns or [
         "vrest_mv", "rs_mohm_final", "rs_drift_pct", "ap_amp_overshoot_mv",
+        "rac_decay_residual_rel", "vm_drift_within_sweep_mv_per_s",
+        "ap_failure_fraction", "ap_amp_cv", "late_instability_index",
         "baseline_rms_mv", "n_sweeps_total", "n_sweeps_clipped", "n_sweeps_nan",
         "qc_protocol_coverage",
     ]
@@ -110,6 +112,20 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 f"reviewer: {html.escape(str(row.get('override_reviewer','')))}; "
                 f"note: {html.escape(override_note)}</div>"
             )
+        vision_block = ""
+        vv = row.get("vision_verdict")
+        if vv is not None and not (isinstance(vv, float) and pd.isna(vv)) and str(vv) != "":
+            try:
+                conf = float(row.get("vision_confidence") or 0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            vision_block = (
+                f"<div class='override' style='background:#e7f1f9; border-left-color:#5a9ad6;'>"
+                f"<b>Vision judge</b> — <span class='chip chip-{vv}'>{vv}</span> "
+                f"(confidence {conf:.2f}); "
+                f"reason: {html.escape(str(row.get('vision_reason','')))}; "
+                f"notes: {html.escape(str(row.get('vision_notes','')))}</div>"
+            )
         rows_html.append(f"""
 <tr class='row row-{verdict}' data-verdict='{verdict}' data-dataset='{html.escape(dataset)}' data-cellid='{html.escape(cell_id)}'>
   <td class='expander' onclick='toggle(this)'><span class='caret'>▸</span></td>
@@ -122,6 +138,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
 <tr class='detail' data-cellid='{html.escape(cell_id)}'>
   <td colspan='{5 + len(metric_columns)}'>
     {override_block}
+    {vision_block}
     <div class='detail-grid'>
       <div class='detail-metrics'><table class='kv'>{full_metrics}</table></div>
       <div class='detail-thumbs'>{thumb_html}</div>
@@ -188,6 +205,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
 <h1>{html.escape(project_name)} — QC report</h1>
 <div class='meta'>
   Pipeline v{pipeline_version} · Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} · Thresholds: <code>{html.escape(thresholds_fp)}</code>
+  · <a href="qc_viewer.html" title="Available when served via `nwb-qc serve`">Open interactive viewer →</a>
 </div>
 
 <div class='summary'>

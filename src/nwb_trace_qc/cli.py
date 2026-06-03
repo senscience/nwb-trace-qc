@@ -192,16 +192,32 @@ def list_cells(config_path: Path):
 @click.option("--filter", "filter_arg", default=None,
               help="Restrict to one logical dataset, e.g. dataset=RN")
 @click.option("--report-only", is_flag=True, help="Re-render report from cache without NWB I/O")
-def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool):
-    """Run the full pipeline: discover → cache → compute → threshold → override → report."""
+@click.option("--with-vision/--no-vision", default=None,
+              help="Force the vision judge on/off this run, overriding the config's vision_judge.enabled.")
+def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool, with_vision: bool | None):
+    """Run the full pipeline: discover → cache → compute → threshold → (vision) → override → report."""
     cfg = load_config(config_path)
     filter_ds = None
     if filter_arg:
         if "=" not in filter_arg or not filter_arg.startswith("dataset="):
             raise click.BadParameter("--filter must look like 'dataset=NAME'")
         filter_ds = filter_arg.split("=", 1)[1]
+    if with_vision is not None:
+        cfg.vision_judge.enabled = with_vision
     result = pipeline_run(cfg, filter_dataset=filter_ds, report_only=report_only)
     click.echo(json.dumps(result, indent=2, default=str))
+
+
+@main.command("serve")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--no-browser", is_flag=True, help="Don't auto-open the browser.")
+def serve_cmd(config_path: Path, host: str, port: int, no_browser: bool):
+    """Start the interactive trace viewer (requires `nwb-qc run` to have been executed)."""
+    from .server import serve  # lazy import; avoids pulling pynwb just to run --help
+    cfg = load_config(config_path)
+    serve(cfg, host=host, port=port, open_browser=not no_browser)
 
 
 @main.command("report")

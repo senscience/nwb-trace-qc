@@ -143,12 +143,93 @@ nwb-qc run --config mydata_project.yaml && open qc_output_mydata/qc_report.html
 
 That's the whole workflow. Iterate on thresholds and overrides; the cache makes every run after the first one fast.
 
+## Visual-defect metrics (v0.2.0)
+
+In addition to the scalar metrics, the pipeline computes five trace-shape metrics that catch visual patterns scalar metrics miss:
+
+| Metric | What it catches |
+|---|---|
+| `rac_decay_residual_rel` | Test-pulse / step-response recovery that's glitchy or ringing instead of a clean exponential |
+| `vm_drift_within_sweep_mv_per_s` | Drifting seal — within-sweep Vm slope (e.g. −70 mV → −20 mV over one long sweep) |
+| `ap_failure_fraction` | Spikes that initiate (dV/dt threshold crossing) but never reach overshoot |
+| `ap_amp_cv` | AP peak amplitudes that vary inconsistently within one train |
+| `late_instability_index` | Orderly firing degrading to runaway oscillation in the latter portion of long sweeps |
+
+Their thresholds live in `default_thresholds.yaml` alongside the scalar ones; the rule grammar (`fail_above`, `flag_above`, etc.) is unchanged. See the file for current default values.
+
+## Optional LLM vision judge
+
+Off by default. When enabled, only **borderline** cells (rule-based verdict = `flag`) get sent to a vision model for a second opinion. Cells that clearly pass or fail by the numeric rules skip the vision pass entirely, so the API cost is bounded.
+
+Enable per-project in your YAML:
+
+```yaml
+vision_judge:
+  enabled: true
+  provider: anthropic              # 'anthropic' | 'openai' | 'mock'
+  model: claude-sonnet-4-5
+  api_key_env: ANTHROPIC_API_KEY   # the env var holding your key
+  max_borderline_cells: 100
+  prompt_template: null            # null = bundled default
+  cache_responses: true
+```
+
+Install the provider SDK (one or both):
+
+```bash
+pip install 'nwb-trace-qc[vision-anthropic]'   # or [vision-openai]
+```
+
+Set the API key and run:
+
+```bash
+export ANTHROPIC_API_KEY=...
+nwb-qc run --config mydata_project.yaml --with-vision
+```
+
+**Verdict precedence** (each later step wins):
+
+1. Rule-based verdict (vrest / Rs / AP / visual-defect metrics).
+2. Vision judge:
+   - rules `flag` + vision `fail` → final `fail` (reason: `vision_escalated`).
+   - rules `flag` + vision `pass` → final stays `flag` (reason: `vision_suggests_pass`) — vision can't auto-pass a borderline cell, only flag for review.
+   - rules `fail` is never downgraded; rules `pass` is never escalated by vision.
+3. Human override in `qc_overrides.csv` — always wins.
+
+The HTML report's per-cell expand panel shows both the vision verdict (blue banner with confidence + notes) and any override (yellow banner). Mock provider is bundled for tests — set `provider: mock` to exercise the integration without API calls.
+
+## Interactive trace viewer (`nwb-qc serve`)
+
+The static `qc_report.html` is shareable but only renders the auto-thumbnails of offending sweeps. For visual verification of any sweep on demand, run:
+
+```bash
+nwb-qc serve --config mydata_project.yaml
+```
+
+This starts a localhost-only HTTP server (default port 8765) and opens your browser to the interactive viewer. The viewer reads `qc_report.csv` for the cell list and lazy-loads sweep data from the underlying NWBs on demand — only what you click is decoded.
+
+Layout:
+
+- **Left**: cell list with verdict chips, filterable by `cell_id`, sorted fail/flag first.
+- **Centre-left**: sweeps for the selected cell, grouped by stimulus family.
+- **Right**: 2 × 2 grid of plot panels. Click a sweep to swap it into the next free slot; click "×" to clear a slot.
+
+Plots are rendered with vanilla Canvas (no external JS), include a dashed 0 mV reference line, and decimate via LTTB to ~2,500 points per sweep regardless of source sampling rate. Trace data is fetched via `/api/trace/<cell_id>/<sweep_idx>?max_points=N` — you can hit the API directly for scripting:
+
+```bash
+curl http://127.0.0.1:8765/api/sweeps/JY160222_A_1   # list sweeps
+curl 'http://127.0.0.1:8765/api/trace/JY160222_A_1/0?max_points=1000'
+```
+
+Stop the server with Ctrl-C. The viewer requires `nwb-qc run` to have been executed at least once (it reads the manifest + CSV the run writes); after that the underlying NWB files must remain accessible at their original paths.
+
 ## Other CLI subcommands
 
 | Command | What it does |
 |---|---|
 | `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without doing any NWB I/O. Useful after editing the report template or doing nothing-else-changed runs. |
 | `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (verdict counts only) without writing the report. |
+| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer (see above). |
 | `nwb-qc --version` | Print the package version. |
 
 ## Troubleshooting

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nwb-trace-qc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cohort-scale, configurable QC for patch-clamp electrophysiology traces stored in NWB."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,12 @@ dependencies = [
     "pydantic>=2",
     "matplotlib",
 ]
+
+[project.optional-dependencies]
+vision-anthropic = ["anthropic>=0.34"]
+vision-openai    = ["openai>=1.40"]
+vision           = ["anthropic>=0.34", "openai>=1.40"]
+dev              = ["pytest>=7", "anthropic>=0.34"]
 
 [project.scripts]
 nwb-qc = "nwb_trace_qc.cli:main"

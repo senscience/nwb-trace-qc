@@ -42,6 +42,24 @@ class CellTable(BaseModel):
     dataset_columns: list[str] = Field(default_factory=list)
 
 
+class VisionJudgeConfig(BaseModel):
+    """Opt-in LLM vision-judge configuration. Off by default."""
+
+    enabled: bool = False
+    provider: str = "anthropic"            # 'anthropic' | 'openai' | 'mock'
+    model: str = "claude-sonnet-4-5"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    max_borderline_cells: int = 100
+    prompt_template: Path | None = None    # null = bundled default
+    cache_responses: bool = True
+
+    @model_validator(mode="after")
+    def _check_provider(self):
+        if self.provider not in {"anthropic", "openai", "mock"}:
+            raise ValueError(f"vision_judge.provider must be anthropic|openai|mock, got {self.provider!r}")
+        return self
+
+
 # Canonical stimulus-protocol families. Keys are *family* names referenced by metrics.
 _DEFAULT_FAMILIES = {
     "spontaneous_hold": ["SponHold3", "SponHold30", "SponNoHold30", "StartHold"],
@@ -68,6 +86,7 @@ class ProjectConfig(BaseModel):
     report_csv: Path | None = None
     thumbnails_dir: Path | None = None
     cell_table: CellTable | None = None
+    vision_judge: VisionJudgeConfig = Field(default_factory=VisionJudgeConfig)
     # absolute base path used to resolve all other relative paths (set by loader)
     config_path: Path | None = None
 
@@ -98,6 +117,8 @@ class ProjectConfig(BaseModel):
             setattr(self, attr, _abs(v))
         if self.thresholds_file is not None:
             self.thresholds_file = _abs(self.thresholds_file)
+        if self.vision_judge and self.vision_judge.prompt_template is not None:
+            self.vision_judge.prompt_template = _abs(self.vision_judge.prompt_template)
         return self
 
 
