@@ -17,7 +17,47 @@ pip install -e /path/to/nwb-trace-qc        # editable install of the repo
 nwb-qc --version
 ```
 
-**Check before moving on:** `nwb-qc --help` lists the five subcommands `init-config`, `list-cells`, `run`, `report`, `thresholds`, and `serve`.
+**Check before moving on:** `nwb-qc --help` lists the subcommands `inspect`, `init-config`, `list-cells`, `run`, `report`, `thresholds`, and `serve`.
+
+---
+
+## Step 0.5 — (Optional) Inspect the source tree before configuring
+
+Before committing to a config, you can get a structured inventory of what's in a folder of wrangler outputs — NWB counts, parquet schemas, fair2.json / README / run_state summaries, and a per-parquet "QC-eligible?" check that tells you which tables `init-config` will register and what column-mapping you'd need for the ones it can't.
+
+```bash
+nwb-qc inspect /path/to/your/data
+```
+
+**Output** (excerpt — real JY example):
+
+```
+[4] output_20260601_195219/  ·  2.8 MB
+    └─ jy_vpl_intracellular_electrophysiology_jane_yi_epfl_lnmc/
+       ├─ README.md               7.4 KB  "JY VPL Intracellular Electrophysiology — Jane Yi, EPFL LNMC"
+       ├─ fair2.json             68.3 KB  Croissant 1.x, JY VPL …
+       ├─ data_dictionary.csv     8.6 KB  31 variable definitions
+       ├─ run_state.json          6.4 KB  v1.0
+       ├─ parquet/
+       │  ├─ acquisitions.parquet         293,499 rows · 11 cols  (map columns.stimulus_type → 'protocol')
+       │  ├─ session_metadata.parquet       2,198 rows · 14 cols  (missing: stimulus_type)
+       └─ scripts/                         extract_nwb_sessions_and_acquisitions.py
+
+Summary
+───────
+  6 datasets · 2,374 NWB files · 33.40 GB total
+  1 acquisition-table parquet would be registered by `init-config`
+```
+
+**Flags:**
+
+| Flag | Effect |
+|---|---|
+| `--output PATH / -o PATH` | Where to write the full Markdown inventory (default: `./<root>_inventory.md`). |
+| `--json` | Emit JSON instead of Markdown (good for piping). |
+| `--no-write` | Skip writing the inventory file; only print to stdout. |
+
+Read-only — never opens NWB files, just counts and sizes them. Useful when you want to know what's in a folder you didn't write yourself, or to confirm that a wrangler output is complete before kicking off a QC run on it.
 
 ---
 
@@ -284,6 +324,7 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 
 | Command | What it does |
 |---|---|
+| `nwb-qc inspect <root>` | Read-only inventory of a wrangler-output tree (NWB counts, parquet schemas, fair2.json / README / run_state summaries, per-parquet QC-eligibility check). See Step 0.5. |
 | `nwb-qc init-config <root>` | Auto-discover NWBs + parquets and write a starter project YAML and per-project thresholds YAML. |
 | `nwb-qc list-cells --config <file>` | Dry-run: print discovered NWBs, dedup info, and which cells map to which dataset. |
 | `nwb-qc run --config <file> [--filter dataset=X] [--with-vision/--no-vision] [--report-only]` | Full pipeline. |

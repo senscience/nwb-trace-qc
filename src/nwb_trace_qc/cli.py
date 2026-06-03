@@ -35,6 +35,29 @@ def main():
     pass
 
 
+@main.command("inspect")
+@click.argument("root_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
+              help="Where to write the full Markdown (or JSON) inventory. Default: ./<root>_inventory.md")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON to stdout (and to --output if given), not Markdown.")
+@click.option("--no-write", is_flag=True, help="Skip writing the inventory file; only print to stdout.")
+def inspect_cmd(root_path: Path, output: Path | None, as_json: bool, no_write: bool):
+    """Read-only inventory of a wrangler-output tree (before deciding to QC it)."""
+    from .inspect import inspect_root, render_terminal, render_markdown, render_json
+    result = inspect_root(root_path)
+    if as_json:
+        click.echo(render_json(result))
+    else:
+        click.echo(render_terminal(result))
+    if no_write:
+        return
+    if output is None:
+        ext = ".json" if as_json else ".md"
+        output = Path.cwd() / f"{root_path.resolve().name}_inventory{ext}"
+    output.write_text(render_json(result) if as_json else render_markdown(result))
+    click.echo(f"\nFull inventory written to: {output}")
+
+
 @main.command("init-config")
 @click.argument("root_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--name", "name", default=None, help="Project name. Default: root_path basename.")
