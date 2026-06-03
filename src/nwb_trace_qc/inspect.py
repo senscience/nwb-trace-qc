@@ -388,8 +388,7 @@ def render_terminal(r: InspectResult, max_parquet_lines: int = 8) -> str:
         for w in wranglers:
             out.append(f"    · {w}")
     out.append("")
-    out.append("Suggested next step:")
-    out.append(f"  nwb-qc init-config {r.root}")
+    out.append(f"Next: nwb-qc init-config {r.root}")
     out.append("")
     return "\n".join(out)
 
@@ -454,7 +453,7 @@ def render_markdown(r: InspectResult) -> str:
         for p in r.loose_nwbs:
             lines.append(f"- `{p.name}`")
         lines.append("")
-    lines.append("## Next step")
+    lines.append("## Next")
     lines.append("")
     lines.append(f"```bash\nnwb-qc init-config {r.root}\nnwb-qc list-cells --config <output>_project.yaml\n```")
     return "\n".join(lines) + "\n"

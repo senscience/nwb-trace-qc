@@ -284,6 +284,7 @@ def list_cells(config_path: Path):
                     f"dropped by only_processed=true (was_processed=false in the manifest). "
                     f"Set only_processed: false in the YAML to include them."
                 )
+    click.echo(f"\nNext: nwb-qc run --config {config_path}")
 
 
 @main.command("run")
@@ -305,6 +306,10 @@ def run_cmd(config_path: Path, filter_arg: str | None, report_only: bool, with_v
         cfg.vision_judge.enabled = with_vision
     result = pipeline_run(cfg, filter_dataset=filter_ds, report_only=report_only)
     click.echo(json.dumps(result, indent=2, default=str))
+    report = result.get("report")
+    if report:
+        click.echo(f"\nNext: open '{report}'   # static HTML report")
+        click.echo(f"      nwb-qc serve --config {config_path}   # interactive trace viewer")
 
 
 @main.command("serve")
@@ -326,6 +331,9 @@ def report_cmd(config_path: Path):
     cfg = load_config(config_path)
     result = pipeline_run(cfg, report_only=True)
     click.echo(json.dumps(result, indent=2, default=str))
+    report = result.get("report")
+    if report:
+        click.echo(f"\nNext: open '{report}'")
 
 
 @main.command("thresholds")
@@ -342,6 +350,7 @@ def thresholds_cmd(config_path: Path, dry_run: bool):
     cache = filter_for_version(load_cache(cfg.cache_path))
     if cache.empty:
         click.echo("Cache is empty; run `nwb-qc run` first.")
+        click.echo(f"\nNext: nwb-qc run --config {config_path}")
         return
     thresholds = load_thresholds(cfg.thresholds_file)
     counts = {"pass": 0, "flag": 0, "fail": 0}
@@ -350,3 +359,7 @@ def thresholds_cmd(config_path: Path, dry_run: bool):
         v, _ = evaluate(m, thresholds)
         counts[v] += 1
     click.echo(f"Verdict counts against {len(cache)} cached NWBs: {counts}")
+    click.echo(
+        f"\nNext: edit {cfg.thresholds_file.name if cfg.thresholds_file else '<thresholds-file>'} then "
+        f"`nwb-qc run --config {config_path}`   # re-render uses the cache, no NWB I/O"
+    )
