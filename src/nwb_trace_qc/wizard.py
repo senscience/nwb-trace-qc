@@ -28,7 +28,14 @@ from .pipeline import run as pipeline_run
 
 
 def _hr(char: str = "─") -> None:
-    click.echo(char * 72)
+    click.secho(char * 72, dim=True)
+
+
+def _stage_banner(n: int, total: int, title: str) -> None:
+    """Render the bold STAGE N/M · title banner."""
+    click.secho("═" * 72, dim=True)
+    click.secho(f"STAGE {n}/{total} · {title}", bold=True, fg="cyan")
+    _hr()
 
 
 def _eta(done: int, total: int, elapsed_s: float) -> str:
@@ -43,8 +50,8 @@ def _eta(done: int, total: int, elapsed_s: float) -> str:
 
 def _make_progress_callback() -> tuple[Callable[[str, int, int], None], list[float]]:
     """Returns (callback, [stage_t0]). The callback prints a carriage-return
-    progress line on TTY stdout. On non-TTY, falls back to one INFO log line
-    per stage start (logging already covers per-stage).
+    progress line on TTY stdout. On non-TTY, stays silent (logging already
+    covers per-stage announcements).
     """
     is_tty = sys.stdout.isatty()
     state: dict[str, float] = {}
@@ -54,41 +61,53 @@ def _make_progress_callback() -> tuple[Callable[[str, int, int], None], list[flo
         if stage not in state:
             state[stage] = now
             if is_tty:
-                click.echo(f"\n  [stage] {stage} starting…")
+                click.echo("")
+                click.secho("  ▸ ", fg="cyan", nl=False)
+                click.secho(f"{stage}", fg="cyan", bold=True, nl=False)
+                click.secho(" starting…", dim=True)
         if not is_tty:
             return
         elapsed = now - state[stage]
+        stage_lbl = click.style(f"[{stage}]", fg="cyan")
         if total > 0:
             pct = 100.0 * done / total
-            line = (f"  [{stage}] {done}/{total} ({pct:.1f}%)  "
-                    f"elapsed {elapsed:.1f}s  ETA {_eta(done, total, elapsed)}")
+            counts = click.style(f"{done}/{total}", bold=True)
+            pct_str = click.style(f"({pct:.1f}%)", fg="green" if pct >= 100 else "yellow")
+            eta = click.style(_eta(done, total, elapsed), dim=True)
+            line = f"  {stage_lbl} {counts} {pct_str}  elapsed {elapsed:.1f}s  ETA {eta}"
         else:
-            line = f"  [{stage}] {done} done · elapsed {elapsed:.1f}s"
-        # carriage return overwrite; newline when stage completes
+            line = f"  {stage_lbl} {done} done · elapsed {elapsed:.1f}s"
+        # \033[K clears from cursor to end of line — handles ANSI-styled output
+        # cleanly without having to measure visible-vs-raw length.
         end = "\n" if (total > 0 and done >= total) else ""
-        click.echo("\r" + line.ljust(72), nl=bool(end))
+        click.echo("\r" + line + "\033[K", nl=bool(end))
 
     return cb, []
 
 
 def _prompt_choice(prompt: str, choices: list[str], default: str | None = None) -> str:
-    """Prompt the user for one of `choices` (single-letter). Echoes the choice list."""
-    choice_str = "/".join(f"[{c}]{label}" for c, label in zip("".join(choices), choices))
+    """Prompt the user for one of `choices` (single-letter on the first letter of each).
+    Echoes a colored choice list like `[a]accept/[e]edit/[q]quit`.
+    """
+    parts = []
+    for c in choices:
+        letter = click.style(f"[{c[0]}]", fg="cyan", bold=True)
+        parts.append(f"{letter}{c[1:]}")
+    choice_str = "/".join(parts)
+    valid = {c[0] for c in choices}
     while True:
         raw = click.prompt(f"{prompt} ({choice_str})",
                            default=default, show_default=bool(default)).strip().lower()
         if not raw and default:
             return default
-        if raw and raw[0] in {c[0] for c in choices}:
+        if raw and raw[0] in valid:
             return raw[0]
-        click.echo(f"  please answer one of: {', '.join(choices)}")
+        click.secho(f"  please answer one of: {', '.join(choices)}", fg="red")
 
 
 def _stage_inspect(root: Path) -> bool:
     from .inspect import inspect_root, render_terminal
-    _hr("═")
-    click.echo("STAGE 1/5 · Inspect")
-    _hr()
+    _stage_banner(1, 5, "Inspect")
     click.echo(render_terminal(inspect_root(root)))
     _hr()
     ans = _prompt_choice("continue?", ["yes", "quit"], default="y")
@@ -105,8 +124,9 @@ def _stage_propose(root: Path, output_path: Path,
     output_path.write_text(yaml_text)
 
     while True:
-        _hr("═")
-        click.echo(f"STAGE 2/5 · Propose config  →  {output_path}")
+        click.secho("═" * 72, dim=True)
+        click.secho(f"STAGE 2/5 · Propose config", bold=True, fg="cyan", nl=False)
+        click.secho(f"  →  {output_path}", dim=True)
         _hr()
         text = output_path.read_text()
         if "⚠ UNMAPPED" in text:
@@ -116,7 +136,7 @@ def _stage_propose(root: Path, output_path: Path,
                 "    stimulus_protocols: to slot them into the right families\n"
                 "    before accepting — otherwise qc_protocol_coverage will be\n"
                 "    False for every cell.",
-                fg="yellow")
+                fg="yellow", bold=True)
         click.echo(text)
         _hr()
         ans = _prompt_choice("review", ["accept", "edit", "quit"], default="a")
@@ -127,7 +147,7 @@ def _stage_propose(root: Path, output_path: Path,
         # edit
         edited = click.edit(filename=str(output_path))
         if edited is None:
-            click.echo("  (no changes saved)")
+            click.secho("  (no changes saved)", dim=True)
 
 
 def _stage_dryrun(config_path: Path) -> str:
@@ -138,17 +158,19 @@ def _stage_dryrun(config_path: Path) -> str:
     cfg = load_config(config_path)
     manifest = build_manifest(cfg)
     uniq = unique_nwbs(manifest)
-    _hr("═")
-    click.echo("STAGE 3/5 · Dry-run")
-    _hr()
-    click.echo(f"Project: {cfg.project_name}")
+    _stage_banner(3, 5, "Dry-run")
+    click.secho(f"Project: ", nl=False); click.secho(cfg.project_name, bold=True)
     click.echo(f"Sources: {len(cfg.nwb_sources)}")
     for s in cfg.nwb_sources:
         n = int((manifest['dataset'] == s.dataset).sum())
         loc = f"manifest {s.manifest}" if s.manifest is not None else f"at {s.path}"
-        click.echo(f"  - {s.dataset}: {n} NWBs ({loc})")
-    click.echo(f"Total NWB rows: {len(manifest)}")
-    click.echo(f"Unique by sha256: {len(uniq)} (dedup saves {len(manifest)-len(uniq)} compute steps)")
+        click.secho(f"  - {s.dataset}: ", nl=False)
+        click.secho(f"{n} NWBs", fg="green", bold=True, nl=False)
+        click.secho(f" ({loc})", dim=True)
+    click.secho(f"Total NWB rows: ", nl=False); click.secho(str(len(manifest)), bold=True)
+    click.secho(f"Unique by sha256: ", nl=False)
+    click.secho(str(len(uniq)), bold=True, nl=False)
+    click.secho(f" (dedup saves {len(manifest)-len(uniq)} compute steps)", dim=True)
     stats = list(manifest.attrs.get("manifest_stats", []))
     if stats:
         click.echo("\nManifest-source diagnostics:")
@@ -168,27 +190,29 @@ def _stage_run(config_path: Path, *, with_vision: bool | None,
     cfg = load_config(config_path)
     if with_vision is not None:
         cfg.vision_judge.enabled = with_vision
-    _hr("═")
-    click.echo("STAGE 4/5 · Run")
-    _hr()
+    _stage_banner(4, 5, "Run")
     callback, _ = _make_progress_callback()
     try:
         return pipeline_run(cfg, progress_callback=callback,
                             max_cost_usd=max_cost_usd)
     except Exception as e:  # noqa: BLE001
-        click.echo(f"\n  ✗ run failed: {e}")
+        click.secho(f"\n  ✗ run failed: {e}", fg="red", bold=True)
         return None
 
 
 def _stage_outcome(result: dict) -> None:
-    _hr("═")
-    click.echo("STAGE 5/5 · Outcome")
-    _hr()
-    click.echo(f"  cells:      {result.get('n_cells', 0)} "
-               f"(pass={result.get('n_pass',0)} flag={result.get('n_flag',0)} fail={result.get('n_fail',0)})")
-    click.echo(f"  report:     {result.get('report')}")
-    click.echo(f"  viewer:     {result.get('viewer')}")
-    click.echo(f"  run report: {result.get('run_report')}")
+    _stage_banner(5, 5, "Outcome")
+    n_pass = result.get('n_pass', 0)
+    n_flag = result.get('n_flag', 0)
+    n_fail = result.get('n_fail', 0)
+    click.echo(f"  cells:      {result.get('n_cells', 0)} (", nl=False)
+    click.secho(f"pass={n_pass}", fg="green", nl=False); click.echo(" ", nl=False)
+    click.secho(f"flag={n_flag}", fg="yellow", nl=False); click.echo(" ", nl=False)
+    click.secho(f"fail={n_fail}", fg="red", nl=False)
+    click.echo(")")
+    click.echo(f"  report:     ", nl=False); click.secho(str(result.get('report')), fg="cyan")
+    click.echo(f"  viewer:     ", nl=False); click.secho(str(result.get('viewer')), fg="cyan")
+    click.echo(f"  run report: ", nl=False); click.secho(str(result.get('run_report')), fg="cyan")
     _hr()
     ans = _prompt_choice("next", ["open", "serve", "done"], default="d")
     if ans == "o":
@@ -198,8 +222,7 @@ def _stage_outcome(result: dict) -> None:
     elif ans == "s":
         from .server import serve
         cfg_path_str = result.get("config_path")
-        # The wizard saved config_path on `result` if available; otherwise leave to caller
-        click.echo("  starting interactive viewer (Ctrl-C to stop)…")
+        click.secho("  starting interactive viewer (Ctrl-C to stop)…", dim=True)
         if cfg_path_str:
             serve(load_config(Path(cfg_path_str)))
 
@@ -209,17 +232,17 @@ def run_wizard(root: Path, *, output_path: Path, name: str | None = None,
                max_cost_usd: float | None = None) -> int:
     """Drive the five-stage interactive flow. Returns a CLI exit code."""
     if not _stage_inspect(root):
-        click.echo("aborted at inspect.")
+        click.secho("aborted at inspect.", fg="red")
         return 1
     while True:
         accepted = _stage_propose(root, output_path,
                                   name=name, guess_tables=guess_tables)
         if accepted is None:
-            click.echo("aborted at propose.")
+            click.secho("aborted at propose.", fg="red")
             return 1
         choice = _stage_dryrun(accepted)
         if choice == "q":
-            click.echo("aborted at dry-run.")
+            click.secho("aborted at dry-run.", fg="red")
             return 1
         if choice == "b":
             continue

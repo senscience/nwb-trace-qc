@@ -307,11 +307,37 @@ def _build_starter_config(root_path: Path, *, name: str | None = None,
     return header + yaml.safe_dump(cfg, sort_keys=False)
 
 
+class _ColorFormatter(logging.Formatter):
+    """Lightweight ANSI colorizer for stderr log lines. No deps."""
+    _COLORS = {
+        logging.DEBUG:    "\033[2m",                # dim grey
+        logging.INFO:     "\033[36m",               # cyan
+        logging.WARNING:  "\033[33m",               # yellow
+        logging.ERROR:    "\033[31m",               # red
+        logging.CRITICAL: "\033[1;31m",             # bold red
+    }
+    _RESET = "\033[0m"
+
+    def __init__(self, *args, use_color: bool, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        s = super().format(record)
+        if not self._use_color:
+            return s
+        return f"{self._COLORS.get(record.levelno, '')}{s}{self._RESET}"
+
+
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
-                                            datefmt="%H:%M:%S"))
+    use_color = sys.stderr.isatty() and os.environ.get("NO_COLOR") is None
+    handler.setFormatter(_ColorFormatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        use_color=use_color,
+    ))
     root = logging.getLogger()
     # Avoid duplicating handlers when CLI is invoked multiple times in one process (tests)
     root.handlers = [handler]
