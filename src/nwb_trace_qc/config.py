@@ -9,10 +9,26 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class NWBSource(BaseModel):
+    """A logical NWB-source dataset, either as a directory tree or a wrangler source-manifest."""
+
     dataset: str
-    path: Path
+    # Directory-tree mode (legacy default)
+    path: Path | None = None
     recursive: bool = True
     glob: str = "**/*.nwb"
+    # Source-manifest mode (alternative; mutually exclusive with `path`)
+    manifest: Path | None = None
+    only_processed: bool = True          # drop entries where was_processed=false
+    reuse_sha256: bool = True            # trust manifest hash if size+mtime match
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self):
+        if (self.path is None) == (self.manifest is None):
+            raise ValueError(
+                f"NWBSource {self.dataset!r}: exactly one of `path` or `manifest` must be set "
+                f"(path={self.path!r}, manifest={self.manifest!r})"
+            )
+        return self
 
 
 class AcquisitionColumnMap(BaseModel):
@@ -99,7 +115,10 @@ class ProjectConfig(BaseModel):
             return p if p.is_absolute() else (base / p).resolve()
         self.output_dir = _abs(self.output_dir)  # type: ignore[assignment]
         for s in self.nwb_sources:
-            s.path = _abs(s.path)  # type: ignore[assignment]
+            if s.path is not None:
+                s.path = _abs(s.path)  # type: ignore[assignment]
+            if s.manifest is not None:
+                s.manifest = _abs(s.manifest)  # type: ignore[assignment]
         for t in self.acquisition_tables:
             t.path = _abs(t.path)  # type: ignore[assignment]
         if self.cell_table:

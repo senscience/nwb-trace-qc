@@ -44,6 +44,20 @@ class SimpleFile:
 
 
 @dataclass
+class SourceManifestInfo:
+    path: Path
+    schema_version: int | None = None
+    generated_at: str = ""
+    total_files: int = 0
+    total_bytes: int = 0
+    n_processed: int = 0
+    preservation_included: bool | None = None
+    # Cheap presence check: stat a small sample of original_locations
+    sample_size: int = 0
+    sample_present: int = 0
+
+
+@dataclass
 class DatasetEntry:
     """One discovered top-level subfolder of the inspection root."""
     name: str
@@ -57,6 +71,7 @@ class DatasetEntry:
     readme: SimpleFile | None = None
     data_dictionary: SimpleFile | None = None
     run_state: SimpleFile | None = None
+    source_manifest: SourceManifestInfo | None = None
     scripts: list[str] = field(default_factory=list)
     nested_subroot: Path | None = None  # the inner project dir (e.g. jy_vpl_…)
 
@@ -178,6 +193,32 @@ def _summarize_run_state(p: Path) -> SimpleFile:
         return SimpleFile(path=p, size=size, summary="(JSON parse failed)")
 
 
+def _summarize_source_manifest(p: Path, sample: int = 5) -> SourceManifestInfo:
+    info = SourceManifestInfo(path=p)
+    try:
+        with open(p) as f:
+            data = json.load(f)
+    except Exception:
+        return info
+    info.schema_version = data.get("schema_version")
+    info.generated_at = str(data.get("generated_at", ""))
+    pres = data.get("preservation") or {}
+    info.preservation_included = pres.get("included") if "included" in pres else None
+    summary = data.get("summary") or {}
+    info.total_files = int(summary.get("total_files") or 0)
+    info.total_bytes = int(summary.get("total_size_bytes") or 0)
+    info.n_processed = int(summary.get("processed_files") or 0)
+    # Sample-check: do the first few original_locations actually exist?
+    files = data.get("files") or []
+    sample_list = files[:sample]
+    info.sample_size = len(sample_list)
+    for f in sample_list:
+        loc = (f.get("original_location") or "").strip()
+        if loc and Path(loc).expanduser().exists():
+            info.sample_present += 1
+    return info
+
+
 def _summarize_data_dictionary(p: Path) -> SimpleFile:
     size = p.stat().st_size
     try:
@@ -225,6 +266,11 @@ def _scan_subroot(subroot: Path) -> DatasetEntry:
         if p.is_file():
             setattr(entry, attr, summarizer(p))
 
+    # source_material/source_manifest.json
+    smp = inner / "source_material" / "source_manifest.json"
+    if smp.is_file():
+        entry.source_manifest = _summarize_source_manifest(smp)
+
     # Scripts
     scripts_dir = inner / "scripts"
     if scripts_dir.is_dir():
@@ -259,7 +305,8 @@ def inspect_root(root: Path) -> InspectResult:
     for sub in top:
         entry = _scan_subroot(sub)
         # Skip subfolders that have no NWBs AND no parquets AND no metadata — probably noise
-        if entry.n_nwbs_total == 0 and not entry.parquets and not (entry.fair2 or entry.readme or entry.run_state):
+        if (entry.n_nwbs_total == 0 and not entry.parquets and not entry.source_manifest
+                and not (entry.fair2 or entry.readme or entry.run_state)):
             continue
         result.datasets.append(entry)
     # Loose NWBs at root
@@ -291,6 +338,15 @@ def render_terminal(r: InspectResult, max_parquet_lines: int = 8) -> str:
         if d.fair2: out.append(f"{prefix}├─ fair2.json           {_human_bytes(d.fair2.size):>9}  {d.fair2.summary}")
         if d.data_dictionary: out.append(f"{prefix}├─ data_dictionary.csv  {_human_bytes(d.data_dictionary.size):>9}  {d.data_dictionary.summary}")
         if d.run_state: out.append(f"{prefix}├─ run_state.json       {_human_bytes(d.run_state.size):>9}  {d.run_state.summary}")
+        if d.source_manifest:
+            sm = d.source_manifest
+            pres = "not copied" if sm.preservation_included is False else ("copied" if sm.preservation_included else "?")
+            sample = f"sample {sm.sample_present}/{sm.sample_size} present on disk" if sm.sample_size else "(no files)"
+            out.append(
+                f"{prefix}├─ source_material/source_manifest.json   "
+                f"schema v{sm.schema_version} · {sm.total_files} files · {_human_bytes(sm.total_bytes)} · "
+                f"preservation: {pres} · {sample}"
+            )
         if d.parquets:
             out.append(f"{prefix}├─ parquet/")
             for pq_info in d.parquets[:max_parquet_lines]:
@@ -359,6 +415,14 @@ def render_markdown(r: InspectResult) -> str:
             lines.append(f"**data_dictionary.csv** ({_human_bytes(d.data_dictionary.size)}) — {d.data_dictionary.summary}")
         if d.run_state:
             lines.append(f"**run_state.json** ({_human_bytes(d.run_state.size)}) — {d.run_state.summary}")
+        if d.source_manifest:
+            sm = d.source_manifest
+            pres = "not copied" if sm.preservation_included is False else ("copied" if sm.preservation_included else "?")
+            sample = f"sample {sm.sample_present}/{sm.sample_size} present on disk" if sm.sample_size else "(no files)"
+            lines.append(
+                f"**source_material/source_manifest.json** — schema v{sm.schema_version}; "
+                f"{sm.total_files} files; {_human_bytes(sm.total_bytes)}; preservation: {pres}; {sample}"
+            )
         lines.append("")
         if d.parquets:
             lines.append("### Parquet tables")
@@ -419,6 +483,19 @@ def render_json(r: InspectResult) -> str:
             "readme_summary": d.readme.summary if d.readme else None,
             "data_dictionary_summary": d.data_dictionary.summary if d.data_dictionary else None,
             "run_state_summary": d.run_state.summary if d.run_state else None,
+            "source_manifest": (
+                None if not d.source_manifest else {
+                    "path": str(d.source_manifest.path),
+                    "schema_version": d.source_manifest.schema_version,
+                    "generated_at": d.source_manifest.generated_at,
+                    "total_files": d.source_manifest.total_files,
+                    "total_bytes": d.source_manifest.total_bytes,
+                    "n_processed": d.source_manifest.n_processed,
+                    "preservation_included": d.source_manifest.preservation_included,
+                    "sample_size": d.source_manifest.sample_size,
+                    "sample_present": d.source_manifest.sample_present,
+                }
+            ),
             "scripts": d.scripts,
         }
     return json.dumps({

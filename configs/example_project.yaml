@@ -7,6 +7,10 @@ project_name: "My Cohort QC"
 output_dir: ./qc_output
 
 # 1. WHERE THE NWB FILES LIVE. One or more "sources"; each is a logical dataset label.
+#    Two modes per source (mutually exclusive):
+#      (a) directory tree: `path:` + `glob:` — walk a folder for NWBs.
+#      (b) source manifest: `manifest:` — read a wrangler `source_manifest.json`
+#          and QC the files at their `original_location`. No copy needed.
 nwb_sources:
   - dataset: cohort_a
     path: /data/cohort_a
@@ -17,6 +21,14 @@ nwb_sources:
   - dataset: cohort_b
     path: /data/cohort_b
     glob: "electrical-cell-recording (*)/data/*/*.nwb"
+
+  # Example with a wrangler source manifest: discovers NWBs from the manifest's
+  # `original_location` (no need for the wrangler to copy source files into the package).
+  # `init-config` auto-detects this layout under any top-level subfolder.
+  - dataset: cohort_c
+    manifest: /data/output_…/proj/source_material/source_manifest.json
+    only_processed: true    # default: skip entries where was_processed=false
+    reuse_sha256: true      # default: trust the manifest's sha256 if size+mtime match (perf win)
 
 # 2. (Optional) Pre-computed acquisition parquets the pipeline REUSES instead of opening
 #    every NWB to count stimuli. If your data wrangler already produced these, point here.

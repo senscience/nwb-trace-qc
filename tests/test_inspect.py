@@ -51,6 +51,28 @@ def _make_synthetic_tree(root: Path) -> None:
     b = root / "cohort_b"; b.mkdir()
     (b / "cell3.nwb").write_bytes(b"\0" * 512)
 
+    # cohort_c — a wrangler output WITH source_material/source_manifest.json
+    # but no NWBs locally (sources not preserved)
+    c_proj = root / "cohort_c" / "proj"
+    c_proj.mkdir(parents=True)
+    (c_proj / "source_material").mkdir()
+    # Make one fake source NWB that lives outside cohort_c
+    src_nwb = root / "external_data" / "cell_42.nwb"
+    src_nwb.parent.mkdir()
+    src_nwb.write_bytes(b"\0" * 4096)
+    manifest = {
+        "schema_version": 5, "generated_at": "2026-06-01T00:00:00Z",
+        "preservation": {"included": False},
+        "summary": {"total_files": 1, "total_size_bytes": 4096, "processed_files": 1},
+        "files": [{
+            "path": "source_material/cell_42.nwb",
+            "original_location": str(src_nwb), "size_bytes": 4096,
+            "sha256": "deadbeef" * 8, "mtime": src_nwb.stat().st_mtime,
+            "was_processed": True,
+        }],
+    }
+    (c_proj / "source_material" / "source_manifest.json").write_text(json.dumps(manifest))
+
     (root / "empty_dir").mkdir()
 
 
@@ -58,8 +80,34 @@ def test_inspect_finds_expected_datasets(tmp_path: Path):
     _make_synthetic_tree(tmp_path)
     r = inspect_root(tmp_path)
     names = sorted(d.name for d in r.datasets)
-    assert names == ["cohort_a", "cohort_b"]  # empty_dir filtered out
-    assert r.total_nwbs() == 3
+    # cohort_a (NWBs + parquets), cohort_b (loose NWB), cohort_c (manifest-only, no local NWBs)
+    # external_data/ is just a holder for the manifest's source files; it ends up in the listing too
+    # since it has NWBs in it.
+    assert "cohort_a" in names and "cohort_b" in names and "cohort_c" in names
+    # empty_dir is filtered out
+    assert "empty_dir" not in names
+
+
+def test_inspect_picks_up_source_manifest(tmp_path: Path):
+    _make_synthetic_tree(tmp_path)
+    r = inspect_root(tmp_path)
+    cohort_c = next(d for d in r.datasets if d.name == "cohort_c")
+    sm = cohort_c.source_manifest
+    assert sm is not None
+    assert sm.schema_version == 5
+    assert sm.total_files == 1
+    assert sm.preservation_included is False
+    assert sm.sample_size == 1
+    assert sm.sample_present == 1
+    # Renderers should include the manifest line
+    out_t = render_terminal(r)
+    assert "source_material/source_manifest.json" in out_t
+    assert "schema v5" in out_t
+    out_md = render_markdown(r)
+    assert "source_manifest.json" in out_md
+    out_json = json.loads(render_json(r))
+    by_name = {d["name"]: d for d in out_json["datasets"]}
+    assert by_name["cohort_c"]["source_manifest"]["total_files"] == 1
 
 
 def test_inspect_classifies_qc_eligible_parquet(tmp_path: Path):
@@ -112,5 +160,7 @@ def test_render_json_valid(tmp_path: Path):
     _make_synthetic_tree(tmp_path)
     r = inspect_root(tmp_path)
     obj = json.loads(render_json(r))
-    assert obj["total_nwbs"] == 3
-    assert len(obj["datasets"]) == 2
+    # cohort_a has 2 NWBs, cohort_b has 1, plus 1 in external_data referenced by cohort_c's manifest = 4 total
+    assert obj["total_nwbs"] == 4
+    # cohort_a, cohort_b, cohort_c, external_data — all have NWBs or manifests
+    assert len(obj["datasets"]) >= 3

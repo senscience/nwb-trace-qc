@@ -225,4 +225,5 @@ def run(cfg: ProjectConfig, *, filter_dataset: str | None = None, report_only: b
         "report": str(cfg.report_html),
         "viewer": str(cfg.report_html.parent / "qc_viewer.html"),
         "vision": vision_stats,
+        "manifest_stats": list(manifest.attrs.get("manifest_stats", [])),
     }

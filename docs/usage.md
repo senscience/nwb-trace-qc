@@ -59,6 +59,36 @@ Summary
 
 Read-only — never opens NWB files, just counts and sizes them. Useful when you want to know what's in a folder you didn't write yourself, or to confirm that a wrangler output is complete before kicking off a QC run on it.
 
+### When the wrangler didn't copy source NWBs into the package
+
+Some wrangler runs leave `source_material/` as just a `source_manifest.json` (Croissant schema v5) — a JSON list of every source NWB by **absolute `original_location`**, with size + sha256 + mtime per file. `inspect` surfaces this manifest and `init-config` will use it as the discovery source, so you can QC files **in place** without the wrangler copying them.
+
+```
+nwb-qc inspect /path/to/wrangler-output:
+…
+├─ source_material/source_manifest.json   schema v5 · 33 files · 1.06 GB · preservation: not copied · sample 5/5 present on disk
+…
+```
+
+`init-config` against such a tree auto-emits a `manifest:`-form source instead of a `path:` + `glob:` source:
+
+```yaml
+nwb_sources:
+  - dataset: jy_red_nucleus_intracellular_ephys_epfl_lnmc
+    manifest: /…/source_material/source_manifest.json
+    only_processed: true   # skip files the wrangler marked was_processed=false
+```
+
+The pipeline reads the manifest's `original_location` to find every NWB, and **reuses the manifest's pre-computed sha256** when the on-disk file's size and mtime still match (±1 s). For a cohort whose NWBs total ~1 GB this saves the entire hashing step on every subsequent run. `list-cells` reports the diagnostics:
+
+```
+Manifest-source diagnostics:
+  - jy_red_nucleus_…: 33 in manifest · 32 eligible · 32 present · 0 missing ·
+                       sha256 reused 32 / recomputed 0
+```
+
+If a source file has been touched (mtime change) or moved (missing on disk), the manifest stats show it and the pipeline either recomputes the hash or skips the missing file with a logged warning — no silent staleness.
+
 ---
 
 ## Step 1 — Auto-discover and write a project config
