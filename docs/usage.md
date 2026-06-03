@@ -1,16 +1,36 @@
 # Usage — running `nwb-trace-qc` on a dataset
 
-A step-by-step walkthrough from raw NWB folder to interactive report. Three commands cover 99% of the workflow; the rest of this page explains what each does, what to look at, and how to iterate.
+A linear, step-by-step walkthrough from a folder of NWBs to a triaged, human-reviewed verdict for every cell. Each step shows the exact command, the output you should see, and what to check before moving on.
 
-## 1. Auto-discover and write a config
+The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the interactive viewer for visual verification. **Step 6** is the iteration loop (thresholds, overrides, optional LLM second opinion).
 
-Point `init-config` at any folder that contains NWB files (and, optionally, wrangler parquet tables sharing that root). It walks the tree, groups NWBs by top-level subfolder, detects acquisition parquets by schema, and writes a ready-to-run YAML.
+---
+
+## Step 0 — Install
+
+One-time. Picks up `pynwb`, `efel`, `pandas`, `matplotlib`, `pyarrow`, `pyyaml`, `click`, `pydantic`, and both `anthropic` and `openai` SDKs (the vision judge is ready to use once you set an API key — no second install).
 
 ```bash
+pip install -e /path/to/nwb-trace-qc        # editable install of the repo
+# or, once published:
+# pip install nwb-trace-qc
+nwb-qc --version
+```
+
+**Check before moving on:** `nwb-qc --help` lists the five subcommands `init-config`, `list-cells`, `run`, `report`, `thresholds`, and `serve`.
+
+---
+
+## Step 1 — Auto-discover and write a project config
+
+Point `init-config` at the folder that contains your NWB files (subfolders are fine). It walks the tree, groups NWBs by top-level subfolder into named datasets, detects any wrangler parquet tables, and writes a ready-to-run YAML.
+
+```bash
+cd /where/you/want/the/config
 nwb-qc init-config /path/to/your/data
 ```
 
-Output (example):
+**Output:**
 
 ```
 Wrote ./mydata_project.yaml
@@ -18,28 +38,32 @@ Wrote ./mydata_project.yaml
 Next: nwb-qc list-cells --config ./mydata_project.yaml
 ```
 
-Two files appear next to your current directory:
+Two files appear in the current directory:
 
-- `mydata_project.yaml` — the project config. NWB sources, acquisition tables, stimulus-protocol families, output paths, worker count, and a path to your thresholds file.
-- `mydata_thresholds.yaml` — a copy of the bundled defaults so you can edit per-project without touching the global ones.
+- `mydata_project.yaml` — project config (paths, datasets, stimulus-protocol families, output paths, worker count, vision config, …).
+- `mydata_thresholds.yaml` — a per-project copy of the bundled default thresholds so you can edit without touching the global defaults.
 
-If your folder has subfolders (`cohort_a/`, `cohort_b/`), each subfolder containing NWBs becomes one `nwb_sources` entry, named after the subfolder. If your wrangler output is also under that root and includes parquets with `nwb_file` + `stimulus_type` columns, they get registered as `acquisition_tables` automatically.
+**Flags you may want:**
 
-**Options:**
+| Flag | Effect |
+|---|---|
+| `--name myproj` | Override the project name (default = folder basename). |
+| `--output path.yaml` | Override the YAML filename/location. A directory path also works. |
+| `--no-guess-tables` | Skip the parquet scan if you don't want auto-registered acquisition tables. |
 
-- `--name myname` — override the project name (default = folder basename).
-- `--output path/to/file.yaml` — override the YAML filename/location. A directory path is also accepted.
-- `--no-guess-tables` — skip the parquet scan if you don't want auto-registration.
+**Check before moving on:** open `mydata_project.yaml` and verify (a) the `nwb_sources:` paths and globs look right, and (b) the `stimulus_protocols:` mapping matches your lab's naming (defaults are LNMC/BBP; e.g. swap `BL_hold` into the `spontaneous_hold:` list if that's what your lab uses).
 
-If you're running from inside the repo root (where a `configs/` folder exists), the default output location becomes `configs/<name>_project.yaml` instead of the current directory.
+---
 
-## 2. Sanity-check what will be processed (no compute)
+## Step 2 — Dry-run: confirm what will be processed
+
+No NWBs are opened in this step (other than reading file sizes); it just enumerates what the config picked up.
 
 ```bash
 nwb-qc list-cells --config mydata_project.yaml
 ```
 
-Output:
+**Output:**
 
 ```
 Project: mydata
@@ -53,30 +77,34 @@ Acquisition tables registered: 2
 Cell table: /path/to/your/data/cells.csv
 ```
 
-This is your moment to confirm the counts look right. If any source is missing or has the wrong count, edit `mydata_project.yaml` — most often you're adjusting the `glob:` for nested archive layouts (e.g. `"**/data/*/*.nwb"` for OBI-style archives) or removing a path that was wrongly picked up.
+**Check before moving on:**
 
-Also worth reviewing in the YAML before the first real run:
+- Counts per dataset match what you expect.
+- Total ≈ what `find . -name '*.nwb' | wc -l` returns under your root.
+- If a number is off, edit `nwb_sources[*].glob:` in the YAML (most often the fix is `"**/data/*/*.nwb"` for nested archive layouts) and rerun this step.
 
-- `stimulus_protocols:` — verify your lab's protocol names appear in the right family. Default is LNMC/BBP; if your lab uses, say, `BL_hold` for the baseline recording, add it to the `spontaneous_hold` list.
-- `thresholds_file:` — peek at `mydata_thresholds.yaml`; loosen or tighten if your preparation differs from juvenile rodent cortical/thalamic patch-clamp.
+---
 
-## 3. Run the pipeline
+## Step 3 — First real run
+
+Computes every metric on every cell, applies thresholds, writes the report. Wall-clock is dominated by NWB I/O divided by `n_workers`; first run on 30 cells ≈ 90 s, on 2,300 cells ≈ 2 h on 6 workers. Every subsequent run hits the per-NWB cache and skips Stage 2 entirely.
 
 ```bash
 nwb-qc run --config mydata_project.yaml
 ```
 
-What happens, in order:
+**What happens, in order:**
 
 1. **Manifest** — sha256-hash every NWB.
-2. **Cache lookup** — skip any NWB whose hash is already in `_qc_cache.parquet` (empty on first run; populated thereafter).
-3. **Metric compute** — open new NWBs in parallel (`n_workers`), extract Vrest / Rs / AP overshoot / etc., append to cache.
+2. **Cache lookup** — skip NWBs already in `_qc_cache.parquet`.
+3. **Metric compute** (parallel) — open new NWBs and extract Vrest, Rs, AP overshoot, the five visual-defect metrics (test-pulse decay shape, within-sweep Vm drift, failed-spike fraction, AP-amplitude CV, late-recording instability), and signal-hygiene counters.
 4. **Apply thresholds** → `pass` / `flag` / `fail` per cell.
-5. **Apply overrides** from `qc_overrides.csv` (empty on first run).
-6. **Render thumbnails** for non-pass cells (cached on disk, skipped on re-runs).
-7. **Write report** (HTML + CSV).
+5. **Render thumbnails** for non-pass cells (cached on disk).
+6. **(Optional) Vision judge** on `flag` cells — only if enabled in YAML or via `--with-vision` (see Step 6c).
+7. **Apply overrides** from `qc_output_*/qc_overrides.csv`.
+8. **Write report** (static HTML + CSV + emit `qc_viewer.html` for Step 5).
 
-Output is a single JSON line:
+**Output is a single JSON line:**
 
 ```json
 {
@@ -88,143 +116,201 @@ Output is a single JSON line:
   "n_flag": 88,
   "n_fail": 247,
   "elapsed_s": 1842.3,
-  "report": "/path/to/qc_output_mydata/qc_report.html"
+  "report": "/path/to/qc_output_mydata/qc_report.html",
+  "viewer": "/path/to/qc_output_mydata/qc_viewer.html",
+  "vision": {"enabled": false}
 }
 ```
 
-Rough timing: a few seconds per NWB single-threaded, divided by `n_workers`. The JY 2,302-NWB run took 2 h 11 m on 6 workers; a 30-cell smoke test takes ~90 s.
-
-## 4. Open the report
-
-```bash
-open /path/to/qc_output_mydata/qc_report.html
-```
-
-Defaults to **Fail + Flag** only — passes are hidden until you toggle them. Per-cell expand panel shows the full metric table, the specific triggers, and inline trace thumbnails of the offending sweeps. No external network requests; you can copy the HTML to a colleague's machine and it still works.
-
-## 5. Iterate
-
-Three things you might do next, none requires touching code.
-
-### a) Tune thresholds
-
-Edit `mydata_thresholds.yaml`. Re-run:
-
-```bash
-nwb-qc run --config mydata_project.yaml
-```
-
-Manifest hashing happens again (~few minutes for thousands of NWBs) but **no NWBs are reopened** — the cache hits — so the bulk of the wall-clock is just report rendering. Verdicts update according to the new rules.
-
-### b) Restrict to one dataset for a smoke test
+**Tip — smoke-test first.** If your cohort is large, run on a single dataset first to validate thresholds before committing to the full run:
 
 ```bash
 nwb-qc run --config mydata_project.yaml --filter dataset=cohort_a
 ```
 
-### c) Stick a human verdict for a cell
+**Check before moving on:** `n_computed_this_run` equals `n_unique_nwbs`. On a second consecutive run it should be **0** (cache hits everything) — that's how you verify caching works.
 
-Append to `qc_output_mydata/qc_overrides.csv`:
+---
+
+## Step 4 — Open the static report
+
+```bash
+open /path/to/qc_output_mydata/qc_report.html
+```
+
+**What you see:**
+
+- Top: total pass/flag/fail counts overall and per-dataset.
+- Filter strip: toggles for verdict (defaults to Fail+Flag only — passes hidden) and dataset, plus a `cell_id` search.
+- Table: one row per cell with verdict badge, triggered metrics as colored chips, and key metric values.
+- Click any row to expand → full metric table, inline trace thumbnails of the offending sweeps, a copyable override template, and (when present) vision-judge / human-override banners.
+
+The HTML has zero external resources. You can copy it to a colleague's laptop and everything still renders.
+
+**Check before moving on:** the cells that show up in fail/flag actually look bad in their thumbnails. If many cells fail on a single metric that *shouldn't* be cohort-wide (e.g. `qc_protocol_coverage`), that points to a stimulus-name or threshold mismatch — handle in Step 6.
+
+---
+
+## Step 5 — Interactive verification (any sweep on demand)
+
+The static report only renders the offending sweep thumbnails. To inspect any sweep of any cell, start the local viewer:
+
+```bash
+nwb-qc serve --config mydata_project.yaml
+```
+
+This starts a localhost-only HTTP server (default port 8765) and opens your browser. The viewer reads the same `qc_report.csv` for the cell list and lazy-loads sweep data from the underlying NWB files only when you click — only the bytes you ask for are decoded.
+
+**Layout:**
+
+- **Left** — cell list with verdict chips, filterable by `cell_id`, sorted fail/flag first.
+- **Centre-left** — sweeps for the selected cell, grouped by stimulus family.
+- **Right** — 2 × 2 grid of plot panels. Click a sweep to drop it into the next free slot; click "×" on a panel to clear it.
+
+Plots render with vanilla Canvas (no JS libraries), include a dashed 0 mV reference line, and decimate via LTTB to ~2,500 points regardless of source sampling rate. Stop the server with `Ctrl-C`.
+
+You can also hit the API directly for scripting:
+
+```bash
+curl http://127.0.0.1:8765/api/sweeps/<cell_id>
+curl 'http://127.0.0.1:8765/api/trace/<cell_id>/<sweep_idx>?max_points=1000'
+```
+
+**Flags:** `--port N` to change the port, `--no-browser` to skip auto-opening.
+
+**Check before moving on:** flagged cells' sweeps visually agree with the rules' verdict. Where they disagree, that's input to Step 6.
+
+---
+
+## Step 6 — Iterate
+
+Three independent dials, none requires code changes.
+
+### 6a — Tune thresholds
+
+Edit `mydata_thresholds.yaml` and rerun:
+
+```bash
+nwb-qc run --config mydata_project.yaml
+```
+
+The cache hits all NWBs (no recompute); only manifest hashing and report rendering happen. For thousands of cells the wall-clock is single-digit minutes.
+
+Rule grammar:
+
+```yaml
+metric_name:
+  fail_above: 30        # value > 30 → fail
+  fail_below: 0         # value < 0  → fail
+  flag_above: 25
+  flag_below: 10
+  fail_if_false: true   # boolean: must be truthy or fail
+```
+
+Verdict precedence: any `fail` wins; else any `flag`; else `pass`. NaN values produce a soft flag (insufficient data), not a fail.
+
+### 6b — Stick a verdict by hand
+
+Append to `qc_output_mydata/qc_overrides.csv` (the expand-row panel in the static report shows a copyable template per cell):
 
 ```csv
 cell_id,override_verdict,note,reviewer,date
 sample_42,pass,manually inspected — overshoot loss is end-of-recording artefact,you,2026-06-03
 ```
 
-That row's verdict becomes whatever you say it is on the next run, regardless of thresholds. The report renders an "Override active" banner with your note. The expand-row panel in the HTML shows a copyable template line per cell to make this easy.
+Overrides survive re-runs and threshold edits. They're applied last, so a human verdict trumps everything else.
 
-## The shortest possible loop
+### 6c — Get a second opinion from an LLM vision judge (optional)
 
-Once everything's configured:
+Off by default. When enabled, only **`flag`-verdict cells** are sent to a vision model — cells that already clearly `pass` or `fail` by the rules don't trigger API calls, so cost is bounded (≤ `max_borderline_cells`, default 100).
+
+**Set an API key** (one or both — `anthropic` and `openai` SDKs are pre-installed):
 
 ```bash
-nwb-qc run --config mydata_project.yaml && open qc_output_mydata/qc_report.html
+export ANTHROPIC_API_KEY=sk-ant-...
+# or
+export OPENAI_API_KEY=sk-...
 ```
 
-That's the whole workflow. Iterate on thresholds and overrides; the cache makes every run after the first one fast.
-
-## Visual-defect metrics (v0.2.0)
-
-In addition to the scalar metrics, the pipeline computes five trace-shape metrics that catch visual patterns scalar metrics miss:
-
-| Metric | What it catches |
-|---|---|
-| `rac_decay_residual_rel` | Test-pulse / step-response recovery that's glitchy or ringing instead of a clean exponential |
-| `vm_drift_within_sweep_mv_per_s` | Drifting seal — within-sweep Vm slope (e.g. −70 mV → −20 mV over one long sweep) |
-| `ap_failure_fraction` | Spikes that initiate (dV/dt threshold crossing) but never reach overshoot |
-| `ap_amp_cv` | AP peak amplitudes that vary inconsistently within one train |
-| `late_instability_index` | Orderly firing degrading to runaway oscillation in the latter portion of long sweeps |
-
-Their thresholds live in `default_thresholds.yaml` alongside the scalar ones; the rule grammar (`fail_above`, `flag_above`, etc.) is unchanged. See the file for current default values.
-
-## Optional LLM vision judge
-
-Off by default. When enabled, only **borderline** cells (rule-based verdict = `flag`) get sent to a vision model for a second opinion. Cells that clearly pass or fail by the numeric rules skip the vision pass entirely, so the API cost is bounded.
-
-Enable per-project in your YAML:
+**Enable per-project** in your YAML:
 
 ```yaml
 vision_judge:
   enabled: true
   provider: anthropic              # 'anthropic' | 'openai' | 'mock'
   model: claude-sonnet-4-5
-  api_key_env: ANTHROPIC_API_KEY   # the env var holding your key
+  api_key_env: ANTHROPIC_API_KEY
   max_borderline_cells: 100
   prompt_template: null            # null = bundled default
   cache_responses: true
 ```
 
-Both the `anthropic` and `openai` SDKs ship with `nwb-trace-qc` by default, so no extra install is needed — just set the API key for whichever provider your `vision_judge.provider` points at and run:
+**Or one-shot via flag:**
 
 ```bash
-export ANTHROPIC_API_KEY=...
 nwb-qc run --config mydata_project.yaml --with-vision
 ```
 
-**Verdict precedence** (each later step wins):
+**Verdict precedence (each later step wins over the previous):**
 
-1. Rule-based verdict (vrest / Rs / AP / visual-defect metrics).
+1. Rule-based verdict.
 2. Vision judge:
    - rules `flag` + vision `fail` → final `fail` (reason: `vision_escalated`).
-   - rules `flag` + vision `pass` → final stays `flag` (reason: `vision_suggests_pass`) — vision can't auto-pass a borderline cell, only flag for review.
-   - rules `fail` is never downgraded; rules `pass` is never escalated by vision.
-3. Human override in `qc_overrides.csv` — always wins.
+   - rules `flag` + vision `pass` → final stays `flag` (reason: `vision_suggests_pass`) — vision can't auto-pass a borderline cell, only flag it for human review.
+   - rules `fail` is never downgraded; rules `pass` is never escalated.
+3. Human override — always wins.
 
-The HTML report's per-cell expand panel shows both the vision verdict (blue banner with confidence + notes) and any override (yellow banner). Mock provider is bundled for tests — set `provider: mock` to exercise the integration without API calls.
+The HTML report's per-cell expand panel shows a blue "Vision judge" banner with confidence + notes whenever the judge weighed in. Use `provider: mock` to exercise the integration deterministically without API calls.
 
-## Interactive trace viewer (`nwb-qc serve`)
+---
 
-The static `qc_report.html` is shareable but only renders the auto-thumbnails of offending sweeps. For visual verification of any sweep on demand, run:
+## The shortest possible loop
 
-```bash
-nwb-qc serve --config mydata_project.yaml
-```
-
-This starts a localhost-only HTTP server (default port 8765) and opens your browser to the interactive viewer. The viewer reads `qc_report.csv` for the cell list and lazy-loads sweep data from the underlying NWBs on demand — only what you click is decoded.
-
-Layout:
-
-- **Left**: cell list with verdict chips, filterable by `cell_id`, sorted fail/flag first.
-- **Centre-left**: sweeps for the selected cell, grouped by stimulus family.
-- **Right**: 2 × 2 grid of plot panels. Click a sweep to swap it into the next free slot; click "×" to clear a slot.
-
-Plots are rendered with vanilla Canvas (no external JS), include a dashed 0 mV reference line, and decimate via LTTB to ~2,500 points per sweep regardless of source sampling rate. Trace data is fetched via `/api/trace/<cell_id>/<sweep_idx>?max_points=N` — you can hit the API directly for scripting:
+Once configured:
 
 ```bash
-curl http://127.0.0.1:8765/api/sweeps/JY160222_A_1   # list sweeps
-curl 'http://127.0.0.1:8765/api/trace/JY160222_A_1/0?max_points=1000'
+nwb-qc run --config mydata_project.yaml && open qc_output_mydata/qc_report.html
 ```
 
-Stop the server with Ctrl-C. The viewer requires `nwb-qc run` to have been executed at least once (it reads the manifest + CSV the run writes); after that the underlying NWB files must remain accessible at their original paths.
+Or, for visual spot-checks instead of opening the static report:
 
-## Other CLI subcommands
+```bash
+nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.yaml
+```
+
+---
+
+## Reference — CLI subcommands
 
 | Command | What it does |
 |---|---|
-| `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without doing any NWB I/O. Useful after editing the report template or doing nothing-else-changed runs. |
-| `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (verdict counts only) without writing the report. |
-| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer (see above). |
+| `nwb-qc init-config <root>` | Auto-discover NWBs + parquets and write a starter project YAML and per-project thresholds YAML. |
+| `nwb-qc list-cells --config <file>` | Dry-run: print discovered NWBs, dedup info, and which cells map to which dataset. |
+| `nwb-qc run --config <file> [--filter dataset=X] [--with-vision/--no-vision] [--report-only]` | Full pipeline. |
+| `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without NWB I/O. |
+| `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (counts only). |
+| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer. |
 | `nwb-qc --version` | Print the package version. |
+
+---
+
+## Reference — what each metric checks
+
+**Scalar (v0.1.0):** `vrest_mv`, `vrest_drift_mv`, `rs_mohm_initial` / `rs_mohm_final` / `rs_drift_pct`, `ap_amp_overshoot_mv`, `ap_threshold_drift_mv`, `baseline_rms_mv`, `n_sweeps_total` / `n_sweeps_clipped` / `n_sweeps_nan`, `qc_protocol_coverage`.
+
+**Visual-defect (v0.2.0):**
+
+| Metric | What it catches |
+|---|---|
+| `rac_decay_residual_rel` | Test-pulse / step-response recovery that's glitchy or rings instead of a clean exponential. |
+| `vm_drift_within_sweep_mv_per_s` | Drifting seal — within-sweep Vm slope (e.g. −70 mV → −20 mV over one long sweep). |
+| `ap_failure_fraction` | Spikes that initiate (dV/dt threshold crossing) but never reach overshoot. |
+| `ap_amp_cv` | AP peak amplitudes that vary inconsistently within one train. |
+| `late_instability_index` | Orderly firing degrading to runaway oscillation in the latter portion of long sweeps. |
+
+All metrics, scalar and visual, share the same rule grammar in `default_thresholds.yaml`.
+
+---
 
 ## Troubleshooting
 
@@ -232,5 +318,9 @@ Stop the server with Ctrl-C. The viewer requires `nwb-qc run` to have been execu
 - **All cells flagged on `qc_protocol_coverage`** — your `stimulus_protocols` mapping doesn't match your data's protocol names. Open one NWB with `pynwb`, list `acquisition.keys()`, and add the relevant tokens to the right family in your project YAML.
 - **Absolute Rs values look unrealistic** — the Rs estimator currently assumes a nominal 50 pA test pulse (it reads only the voltage trace, not the paired stimulus current). Trust `rs_drift_pct` over `rs_mohm_final` until proper Rs from the paired stimulus is implemented; relax or remove the `fail_above` rule on `rs_mohm_final`.
 - **First run feels slow** — it's I/O-bound when NWBs aren't in the OS page cache. Re-runs hit the cache and skip metric compute entirely; only manifest hashing remains.
+- **Vision judge runs but no cells get queried** — only `flag`-verdict cells are sent. If your cohort is all `pass` or all `fail`, the vision judge has nothing to do; widen the borderline by loosening `flag_above` / `fail_above`.
+- **`nwb-qc serve` says "manifest not found"** — you need to have run `nwb-qc run` at least once for the project. The viewer reads `_qc_manifest.parquet` and `qc_report.csv` produced by `run`.
 
-See [`jy_quickstart.md`](jy_quickstart.md) for a worked example with real numbers.
+---
+
+See [`jy_quickstart.md`](jy_quickstart.md) for a worked example with real cohort numbers (2,302 NWBs across VPL / Red Nucleus / OBI Thalamus).
