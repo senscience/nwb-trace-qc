@@ -68,42 +68,77 @@ def _peak_rss_mb() -> float:
     return raw / 1024
 
 
-def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[str]], reasons: list[str]) -> Path | None:
-    """Render up to 3 representative sweeps (one per offending family if possible)."""
+_REASON_TO_FAMILY = {
+    "vrest_mv":            "spontaneous_hold",
+    "vrest_drift_mv":      "spontaneous_hold",
+    "baseline_rms_mv":     "spontaneous_hold",
+    "rs_mohm_initial":     "test_pulse",
+    "rs_mohm_final":       "test_pulse",
+    "rs_drift_pct":        "test_pulse",
+    "rac_decay_residual_rel": "test_pulse",
+    "ap_amp_overshoot_mv": "ap_waveform",
+    "ap_threshold_drift_mv": "ap_waveform",
+    "ap_amp_cv":           "ap_waveform",
+    "ap_failure_fraction": "ap_waveform",
+    "vm_drift_within_sweep_mv_per_s": "rest_firing",
+    "late_instability_index": "rest_firing",
+}
+
+
+def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[str]],
+                    reasons: list[str]) -> tuple[Path | None, str]:
+    """Render up to 3 representative sweeps for an NWB and return (path, status).
+
+    Status is one of: 'rendered', 'no_voltage_sweeps' (the NWB has zero voltage
+    acquisitions — pathological), 'render_error' (matplotlib / I/O blew up).
+
+    Sweep selection: first try sweeps matching the families implicated by the
+    triggering metrics. If none match (lab-specific protocol naming, or NWBs
+    missing the expected families), fall back to "any voltage sweep" so the
+    user still gets *something* to look at — and log a warning so they know
+    their `stimulus_protocols` mapping is incomplete.
+    """
     from .nwb_io import open_nwb
     try:
         with open_nwb(nwb_path) as f:
-            picks = []
-            wanted_families = set()
-            for r in reasons:
-                if r in ("vrest_mv", "vrest_drift_mv"):
-                    wanted_families.add("spontaneous_hold")
-                if r in ("rs_mohm_final", "rs_drift_pct", "rs_mohm_initial"):
-                    wanted_families.add("test_pulse")
-                if r in ("ap_amp_overshoot_mv", "ap_threshold_drift_mv"):
-                    wanted_families.add("ap_waveform")
-                if r == "baseline_rms_mv":
-                    wanted_families.add("spontaneous_hold")
+            wanted_families = {_REASON_TO_FAMILY[r] for r in reasons if r in _REASON_TO_FAMILY}
             if not wanted_families:
                 wanted_families = {"spontaneous_hold", "ap_waveform"}
             fm = StimulusFamilyMap(families)
+
+            voltage_acquisitions = []
             for name, obj in f.acquisition.items():
                 unit = (getattr(obj, "unit", "") or "").lower()
-                if unit not in {"volts", "v", ""}: continue
+                if unit not in {"volts", "v", ""}:
+                    continue
                 stim = name.split("__")[1] if "__" in name and name.count("__") >= 2 else name
-                fam = fm.family_of(stim)
-                if fam in wanted_families:
-                    picks.append((fam, name, obj))
-                    if len(picks) >= 3: break
-            if not picks: return None
+                voltage_acquisitions.append((fm.family_of(stim), name, obj))
+            if not voltage_acquisitions:
+                return None, "no_voltage_sweeps"
+
+            picks = [(fam, name, obj) for (fam, name, obj) in voltage_acquisitions
+                     if fam in wanted_families][:3]
+            if not picks:
+                # Last-resort fallback: render the first 3 voltage sweeps regardless of family.
+                log.warning(
+                    "thumbnail: %s — no sweeps matched %s (families found: %s); "
+                    "falling back to first 3 voltage sweeps. Map your lab's protocols "
+                    "to stimulus_protocols in the project YAML for targeted plots.",
+                    nwb_path.name, sorted(wanted_families),
+                    sorted({f or "?unmapped?" for f, _, _ in voltage_acquisitions}),
+                )
+                picks = voltage_acquisitions[:3]
+
             fig, axes = plt.subplots(len(picks), 1, figsize=(6, 1.8 * len(picks)), sharex=False)
-            if len(picks) == 1: axes = [axes]
+            if len(picks) == 1:
+                axes = [axes]
             for ax, (fam, name, obj) in zip(axes, picks):
                 data = np.asarray(obj.data[:]).reshape(-1)
                 rate = float(getattr(obj, "rate", 0) or 0)
                 t = np.arange(len(data)) / rate if rate > 0 else np.arange(len(data))
                 ax.plot(t, data * 1000.0, lw=0.6, color="#222")
-                ax.set_title(f"{fam}: {name[:50]}", fontsize=8)
+                fam_label = fam or "unmapped"
+                ax.set_title(f"{fam_label}: {name[:50]}", fontsize=8)
                 ax.set_ylabel("mV", fontsize=7)
                 ax.tick_params(labelsize=6)
             axes[-1].set_xlabel("time (s)", fontsize=7)
@@ -111,9 +146,10 @@ def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[
             out_path.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(out_path, dpi=80)
             plt.close(fig)
-            return out_path
-    except Exception:
-        return None
+            return out_path, "rendered"
+    except Exception as e:  # noqa: BLE001
+        log.warning("thumbnail: %s — render failed: %s", nwb_path.name, e)
+        return None, "render_error"
 
 
 def run(
@@ -147,7 +183,10 @@ def run(
 
     def _stage_start(name: str, total: int = 0) -> float:
         log.info("stage: %s starting (total=%d)", name, total)
-        if progress_callback:
+        # Only ping the progress bar for stages with real work — instant stages
+        # (overrides, report, disabled vision) should rely on the INFO log alone
+        # and avoid colliding with stderr log lines on the same TTY row.
+        if progress_callback and total > 0:
             progress_callback(name, 0, total)
         return time.time()
 
@@ -156,9 +195,9 @@ def run(
         stages[name] = {"elapsed_s": elapsed, **extra}
         log.info("stage: %s done in %.2fs (%s)", name, elapsed,
                  ", ".join(f"{k}={v}" for k, v in extra.items() if not isinstance(v, list)))
-        if progress_callback:
-            progress_callback(name, max(1, extra.get("n_total", 1) or 1),
-                              max(1, extra.get("n_total", 1) or 1))
+        n_total = int(extra.get("n_total", 0) or 0)
+        if progress_callback and n_total > 0:
+            progress_callback(name, n_total, n_total)
 
     # ─── Stage 1: manifest ───────────────────────────────────────
     t0 = _stage_start("manifest_build")
@@ -293,6 +332,8 @@ def run(
     seen_for_sha: dict[str, list[Path]] = {}
     n_generated = 0
     n_skipped = 0
+    n_no_voltage = 0
+    n_render_error = 0
     done_thumbs = 0
     for r in verdicts.itertuples(index=False):
         if r.computed_verdict == "pass":
@@ -307,9 +348,14 @@ def run(
             if out.exists():
                 n_skipped += 1
             else:
-                _make_thumbnail(Path(r.nwb_path), out, families=cfg.stimulus_protocols, reasons=reasons)
-                if out.exists():
+                _, status = _make_thumbnail(Path(r.nwb_path), out,
+                                             families=cfg.stimulus_protocols, reasons=reasons)
+                if status == "rendered":
                     n_generated += 1
+                elif status == "no_voltage_sweeps":
+                    n_no_voltage += 1
+                elif status == "render_error":
+                    n_render_error += 1
             if out.exists():
                 seen_for_sha[r.nwb_sha256] = [out]
                 thumbs[r.cell_id] = [out]
@@ -318,7 +364,9 @@ def run(
     _stage_end("thumbnails", t0, {
         "n_generated": int(n_generated),
         "n_skipped_existing": int(n_skipped),
-        "n_total": int((verdicts["computed_verdict"] != "pass").sum()),
+        "n_no_voltage_sweeps": int(n_no_voltage),
+        "n_render_errors": int(n_render_error),
+        "n_total": int(total_thumbs),
     })
 
     # ─── Stage 3.7: optional vision judge ────────────────────────
