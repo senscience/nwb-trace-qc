@@ -132,7 +132,8 @@ def init_config(root_path: Path, name: str | None, output: Path | None, guess_ta
             sources.append({
                 "dataset": sub.name.lower(),
                 "manifest": str(mpath.resolve()),
-                "only_processed": True,
+                "only_processed": False,   # include all NWB entries; flip to true to restrict
+                                            # to files the wrangler directly processed
             })
             click.echo(
                 f"  auto-detected source_manifest.json in {sub.name}/ "
@@ -270,11 +271,19 @@ def list_cells(config_path: Path):
         click.echo("\nManifest-source diagnostics:")
         for s in stats:
             click.echo(
-                f"  - {s['dataset']}: {s['n_files_in_manifest']} in manifest · "
+                f"  - {s['dataset']}: {s['n_files_in_manifest']} files in manifest "
+                f"({s['n_nwbs_in_manifest']} .nwb) · "
                 f"{s['n_eligible_after_filter']} eligible · "
                 f"{s['n_present_on_disk']} present · {s['n_missing_on_disk']} missing · "
                 f"sha256 reused {s['n_sha256_reused']} / recomputed {s['n_sha256_recomputed']}"
             )
+            if s.get("only_processed") and s.get("n_filtered_unprocessed", 0) > 0:
+                click.echo(
+                    f"      ⚠ {s['n_filtered_unprocessed']} additional NWB entr"
+                    f"{'y' if s['n_filtered_unprocessed']==1 else 'ies'} "
+                    f"dropped by only_processed=true (was_processed=false in the manifest). "
+                    f"Set only_processed: false in the YAML to include them."
+                )
 
 
 @main.command("run")

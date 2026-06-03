@@ -71,8 +71,9 @@ def _make_manifest(tmp_path: Path, nwb_paths: list[Path], include_unprocessed: b
 def test_load_source_manifest_basic(tmp_path: Path):
     nwbs = _make_source_nwbs(tmp_path, 3)
     m = _make_manifest(tmp_path, nwbs)
-    entries, total = _load_source_manifest(m, only_processed=True)
+    entries, total, n_nwbs = _load_source_manifest(m, only_processed=False)
     assert total == 3
+    assert n_nwbs == 3
     assert len(entries) == 3
     assert all(e.nwb_path.exists() for e in entries)
     assert all(e.sha256 and len(e.sha256) == 64 for e in entries)
@@ -81,11 +82,31 @@ def test_load_source_manifest_basic(tmp_path: Path):
 def test_load_source_manifest_only_processed(tmp_path: Path):
     nwbs = _make_source_nwbs(tmp_path, 2)
     m = _make_manifest(tmp_path, nwbs, include_unprocessed=True)
-    entries_filtered, total = _load_source_manifest(m, only_processed=True)
+    entries_filtered, total, n_nwbs = _load_source_manifest(m, only_processed=True)
     assert total == 3
+    assert n_nwbs == 3                      # the unprocessed entry is an .nwb
     assert len(entries_filtered) == 2
-    entries_all, _ = _load_source_manifest(m, only_processed=False)
-    assert len(entries_all) == 3
+    entries_all, _, _ = _load_source_manifest(m, only_processed=False)
+    assert len(entries_all) == 3            # default (False) keeps all NWBs
+
+
+def test_default_includes_unprocessed_nwbs(tmp_path: Path):
+    """Regression for the OBI tarball case: NWBs with was_processed=False must still be eligible by default."""
+    nwbs = _make_source_nwbs(tmp_path, 2)
+    m = _make_manifest(tmp_path, nwbs, include_unprocessed=True)
+    # Need the unprocessed file to exist on disk for the build_manifest path
+    (tmp_path / "data" / "skipped.nwb").write_bytes(b"\0" * 100)
+    src = NWBSource(dataset="d", manifest=m)  # only_processed defaults to False
+    assert src.only_processed is False
+    cfg = ProjectConfig(project_name="t", nwb_sources=[src], thresholds_file=None,
+                        output_dir=tmp_path / "out")
+    df = build_manifest(cfg)
+    # All 3 NWBs in the manifest are now eligible
+    assert len(df) == 3
+    stats = df.attrs["manifest_stats"][0]
+    assert stats["n_nwbs_in_manifest"] == 3
+    assert stats["n_filtered_unprocessed"] == 0
+    assert stats["n_eligible_after_filter"] == 3
 
 
 def test_build_manifest_reuses_sha256_when_unchanged(tmp_path: Path):

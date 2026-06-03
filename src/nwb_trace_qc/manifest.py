@@ -48,23 +48,29 @@ class ManifestSourceStats:
 
     dataset: str
     manifest_path: Path
-    n_files_in_manifest: int = 0
-    n_eligible_after_filter: int = 0   # after only_processed
+    n_files_in_manifest: int = 0       # everything in manifest.files
+    n_nwbs_in_manifest: int = 0        # files with .nwb extension
+    n_filtered_unprocessed: int = 0    # NWBs dropped because was_processed=false AND only_processed=true
+    n_eligible_after_filter: int = 0   # NWBs eligible to QC
     n_present_on_disk: int = 0
     n_missing_on_disk: int = 0
     n_sha256_reused: int = 0
     n_sha256_recomputed: int = 0
+    only_processed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "dataset": self.dataset,
             "manifest_path": str(self.manifest_path),
             "n_files_in_manifest": self.n_files_in_manifest,
+            "n_nwbs_in_manifest": self.n_nwbs_in_manifest,
+            "n_filtered_unprocessed": self.n_filtered_unprocessed,
             "n_eligible_after_filter": self.n_eligible_after_filter,
             "n_present_on_disk": self.n_present_on_disk,
             "n_missing_on_disk": self.n_missing_on_disk,
             "n_sha256_reused": self.n_sha256_reused,
             "n_sha256_recomputed": self.n_sha256_recomputed,
+            "only_processed": self.only_processed,
         }
 
 
@@ -82,11 +88,14 @@ def _discover_paths(source: NWBSource) -> list[Path]:
     return sorted(p for p in source.path.glob(source.glob) if p.is_file() and p.suffix == ".nwb")
 
 
-def _load_source_manifest(manifest_path: Path, only_processed: bool = True) -> tuple[list[ManifestEntry], int]:
+def _load_source_manifest(
+    manifest_path: Path, only_processed: bool = False
+) -> tuple[list[ManifestEntry], int, int]:
     """Read a wrangler `source_manifest.json` and return its NWB file entries.
 
     Expands `~` in `original_location` and validates extension. Filters by
-    `was_processed` when `only_processed`. Returns (entries, total_files_in_manifest).
+    `was_processed` when `only_processed`.
+    Returns (entries, total_files_in_manifest, nwbs_in_manifest_pre_filter).
     Raises FileNotFoundError if the manifest itself isn't readable.
     """
     if not manifest_path.exists():
@@ -95,6 +104,7 @@ def _load_source_manifest(manifest_path: Path, only_processed: bool = True) -> t
         data = json.load(f)
     files = data.get("files", []) or []
     out: list[ManifestEntry] = []
+    nwb_count = 0
     for f in files:
         orig = f.get("original_location") or ""
         if not orig:
@@ -102,6 +112,7 @@ def _load_source_manifest(manifest_path: Path, only_processed: bool = True) -> t
         path = Path(orig).expanduser()
         if path.suffix.lower() != ".nwb":
             continue
+        nwb_count += 1
         was_processed = bool(f.get("was_processed", True))
         if only_processed and not was_processed:
             continue
@@ -112,7 +123,7 @@ def _load_source_manifest(manifest_path: Path, only_processed: bool = True) -> t
             mtime=float(f.get("mtime", 0.0) or 0.0),
             was_processed=was_processed,
         ))
-    return out, len(files)
+    return out, len(files), nwb_count
 
 
 def _key_value(path: Path, fmt: str) -> str:
@@ -166,9 +177,17 @@ def _rows_from_path_source(source: NWBSource) -> list[CellRow]:
 
 
 def _rows_from_manifest_source(source: NWBSource, stats_list: list[ManifestSourceStats]) -> list[CellRow]:
-    entries, total = _load_source_manifest(source.manifest, only_processed=source.only_processed)
-    stats = ManifestSourceStats(dataset=source.dataset, manifest_path=source.manifest,
-                                n_files_in_manifest=total, n_eligible_after_filter=len(entries))
+    entries, total, nwbs_in_manifest = _load_source_manifest(
+        source.manifest, only_processed=source.only_processed
+    )
+    stats = ManifestSourceStats(
+        dataset=source.dataset, manifest_path=source.manifest,
+        n_files_in_manifest=total,
+        n_nwbs_in_manifest=nwbs_in_manifest,
+        n_filtered_unprocessed=(nwbs_in_manifest - len(entries)) if source.only_processed else 0,
+        n_eligible_after_filter=len(entries),
+        only_processed=source.only_processed,
+    )
     out: list[CellRow] = []
     for e in entries:
         if not e.nwb_path.exists():

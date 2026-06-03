@@ -18,7 +18,10 @@ class NWBSource(BaseModel):
     glob: str = "**/*.nwb"
     # Source-manifest mode (alternative; mutually exclusive with `path`)
     manifest: Path | None = None
-    only_processed: bool = True          # drop entries where was_processed=false
+    only_processed: bool = False         # default: include every NWB listed in the manifest
+                                         # (was_processed=False often just means "the wrangler
+                                         # processed the parent archive, not this individual NWB",
+                                         # e.g. extracting *.nwb from *.tar.gz)
     reuse_sha256: bool = True            # trust manifest hash if size+mtime match
 
     @model_validator(mode="after")
