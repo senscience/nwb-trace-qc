@@ -43,6 +43,8 @@ nwb-qc run --config <root>_project.yaml
 open qc_output/qc_report.html
 ```
 
+See [`docs/usage.md`](docs/usage.md) for a per-step walkthrough with sample outputs, threshold tuning, and the override loop.
+
 ## Design principles
 
 - **General**: every dataset-specific assumption (paths, filenames, stimulus protocol names, key columns, thresholds) lives in YAML. The same binary runs on any cohort.
@@ -77,4 +79,4 @@ docs/               longer-form usage docs
 
 ## Status
 
-Initial scaffold. See [`docs/usage.md`](docs/usage.md) for the longer-form walkthrough.
+Initial scaffold. See [`docs/usage.md`](docs/usage.md) for the long-form walkthrough and [`docs/jy_quickstart.md`](docs/jy_quickstart.md) for a worked example with real cohort numbers.
