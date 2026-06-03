@@ -32,7 +32,7 @@ nwb-qc start /path/to/your/data
 This walks you through five stages, pausing for confirmation between each:
 
 1. **Inspect** — prints the inventory (same as `nwb-qc inspect`). `[Enter]` to continue.
-2. **Propose config** — generates the project YAML and shows it on screen. `[a]ccept`, `[e]dit` in `$EDITOR`, or `[q]uit`.
+2. **Propose config** — generates the project YAML and shows it on screen. The YAML header includes a discovery block listing every stimulus protocol found in your NWBs, and a yellow `⚠ UNMAPPED tokens` callout when some don't match the default family map (this catches the "all cells fail qc_protocol_coverage" failure mode). `[a]ccept`, `[e]dit` in `$EDITOR`, or `[q]uit`.
 3. **Dry-run** — shows which NWBs were discovered and how many will be processed. `[r]un`, `[b]ack` to re-edit the config, or `[q]uit`.
 4. **Run** — executes the pipeline with a live `[stage 2/6 metric-compute] 142/2302 cells …  ETA 28m` progress line.
 5. **Outcome** — prints the report paths and offers `[o]pen` the report or `[s]erve` the interactive viewer.
@@ -135,6 +135,26 @@ Two files appear in the current directory:
 - `mydata_project.yaml` — project config (paths, datasets, stimulus-protocol families, output paths, worker count, vision config, …).
 - `mydata_thresholds.yaml` — a per-project copy of the bundled default thresholds so you can edit without touching the global defaults.
 
+`init-config` also opens up to 3 NWBs per source to discover which stimulus protocols are actually present in your data, and writes the result as comments in the YAML header — both the protocols that already map to a family and any **unmapped** tokens you'll need to slot in:
+
+```yaml
+# Stimulus protocols discovered by sampling your NWBs:
+#   ap_waveform: APWaveform (72)
+#   iv_subthreshold: IV (48)
+#   rest_firing: IDRest (90)
+#
+# ⚠ UNMAPPED tokens (21 unique, 462 sweeps in sampled NWBs):
+#   C1step_ag  (130 sweeps)
+#   sAHP  (78 sweeps)
+#   Test_eCode  (31 sweeps)
+#   ...
+# Heads-up: no protocols mapped to ['spontaneous_hold', 'test_pulse'] —
+# qc_protocol_coverage will be False for every cell until you assign
+# at least one unmapped token to each essential family.
+```
+
+When you see an UNMAPPED block, edit `stimulus_protocols:` below in the same file to add each lab-specific name to the right family (e.g. add `IRrest` and `Spontaneous` to `spontaneous_hold`, `Test_eCode` and `Delta` to `test_pulse`). Without this step, the QC pipeline still runs, but `qc_protocol_coverage` will be `False` for every cell and downstream metrics that need missing families (`vrest_mv`, `rs_mohm_*`, `baseline_rms_mv`) will be `NaN`.
+
 **Flags you may want:**
 
 | Flag | Effect |
@@ -143,7 +163,7 @@ Two files appear in the current directory:
 | `--output path.yaml` | Override the YAML filename/location. A directory path also works. |
 | `--no-guess-tables` | Skip the parquet scan if you don't want auto-registered acquisition tables. |
 
-**Check before moving on:** open `mydata_project.yaml` and verify (a) the `nwb_sources:` paths and globs look right, and (b) the `stimulus_protocols:` mapping matches your lab's naming (defaults are LNMC/BBP; e.g. swap `BL_hold` into the `spontaneous_hold:` list if that's what your lab uses).
+**Check before moving on:** open `mydata_project.yaml` and verify (a) the `nwb_sources:` paths and globs look right, and (b) the discovery header at the top — if there's an UNMAPPED block, assign those tokens to families before running. The wizard (`nwb-qc start`) prints a yellow callout above the YAML when unmapped tokens are present so you don't miss them.
 
 ---
 
@@ -416,7 +436,7 @@ All metrics, scalar and visual, share the same rule grammar in `default_threshol
 ## Troubleshooting
 
 - **"thresholds_file not found"** — `init-config` couldn't find the bundled defaults to copy. Either run from a directory where the repo's `configs/default_thresholds.yaml` is reachable, or point `thresholds_file:` in your project YAML at an absolute path.
-- **All cells flagged on `qc_protocol_coverage`** — your `stimulus_protocols` mapping doesn't match your data's protocol names. Open one NWB with `pynwb`, list `acquisition.keys()`, and add the relevant tokens to the right family in your project YAML.
+- **All cells flagged on `qc_protocol_coverage`** — your `stimulus_protocols` mapping doesn't match your data's protocol names. The fastest fix is to re-run `nwb-qc init-config` (or `nwb-qc start`) and read the `# ⚠ UNMAPPED tokens` block in the generated YAML header — it lists every stimulus token discovered in your NWBs that no family claims, with per-token sweep counts. Slot them into the right family under `stimulus_protocols:` and rerun. If you'd rather inspect manually: open one NWB with `pynwb`, list `acquisition.keys()`, and add the relevant tokens.
 - **Absolute Rs values look unrealistic** — the Rs estimator currently assumes a nominal 50 pA test pulse (it reads only the voltage trace, not the paired stimulus current). Trust `rs_drift_pct` over `rs_mohm_final` until proper Rs from the paired stimulus is implemented; relax or remove the `fail_above` rule on `rs_mohm_final`.
 - **First run feels slow** — it's I/O-bound when NWBs aren't in the OS page cache. Re-runs hit the cache and skip metric compute entirely; only manifest hashing remains.
 - **Vision judge runs but no cells get queried** — only `flag`-verdict cells are sent. If your cohort is all `pass` or all `fail`, the vision judge has nothing to do; widen the borderline by loosening `flag_above` / `fail_above`.
