@@ -69,3 +69,32 @@ def test_wizard_happy_path(wizard_tree: Path, tmp_path: Path):
     # Run report was generated
     rpt = list((tmp_path).rglob("run_report.json"))
     assert rpt, f"no run_report.json under {tmp_path}; output:\n{result.output}"
+
+
+def test_wizard_auto_writes_cohort_stats_and_suggested_thresholds(wizard_tree: Path,
+                                                                     tmp_path: Path):
+    """After a successful wizard run, cohort_stats.json (next to run_report.json)
+    and `<stem>_thresholds_suggested.yaml` (next to the active thresholds) exist."""
+    runner = CliRunner()
+    out_yaml = tmp_path / "project.yaml"
+    result = runner.invoke(
+        main, ["start", str(wizard_tree), "--output", str(out_yaml)],
+        input="y\na\nr\nd\n",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    cohort_files = list(tmp_path.rglob("cohort_stats.json"))
+    assert cohort_files, f"no cohort_stats.json under {tmp_path}; output:\n{result.output}"
+    import json as _json
+    body = _json.loads(cohort_files[0].read_text())
+    assert isinstance(body, dict) and body, "cohort_stats.json was written empty"
+
+    suggested = list(tmp_path.rglob("*thresholds_suggested.yaml"))
+    assert suggested, (
+        f"no *_thresholds_suggested.yaml under {tmp_path}; output:\n{result.output}"
+    )
+
+    # The outcome stage advertised both files
+    assert "suggested thresholds" in result.output
+    assert "cohort stats" in result.output

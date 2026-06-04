@@ -209,7 +209,71 @@ def _stage_run(config_path: Path, *, with_vision: bool | None,
         return None
 
 
-def _stage_outcome(result: dict) -> None:
+def _auto_calibrate(config_path: Path) -> dict[str, str | None]:
+    """Run calibrate as a side-effect after a successful pipeline run.
+
+    Writes cohort_stats.json (consumed by the NEXT report's chip explanations
+    for percentile context) and a `<stem>_thresholds_suggested.yaml` next to
+    the active thresholds file. Both artifacts are produced unconditionally —
+    they're cheap and useful even if the user never opts into the suggested
+    thresholds. Returns paths for the outcome stage to display.
+
+    Failures are non-fatal: if the cache is empty or thresholds are missing,
+    we report None for the relevant path and continue.
+    """
+    from .cache import filter_for_version, load_cache
+    from .calibrate import (
+        render_suggested_yaml,
+        suggest_thresholds,
+        write_cohort_stats_json,
+    )
+    from .thresholds import load_thresholds
+
+    out: dict[str, str | None] = {"cohort_stats": None, "suggested_thresholds": None}
+    try:
+        cfg = load_config(config_path)
+        cache_df = filter_for_version(load_cache(cfg.cache_path))
+        if cache_df.empty:
+            return out
+        cohort_path = cfg.output_dir / "cohort_stats.json"
+        write_cohort_stats_json(cache_df, cohort_path)
+        out["cohort_stats"] = str(cohort_path)
+
+        if cfg.thresholds_file and cfg.thresholds_file.exists():
+            bundled = load_thresholds(cfg.thresholds_file)
+            suggested = suggest_thresholds(cache_df, bundled)
+            yaml_text = render_suggested_yaml(suggested, n_cells=len(cache_df),
+                                                source_count=len(cfg.nwb_sources))
+            stem = cfg.thresholds_file.stem
+            suggested_path = cfg.thresholds_file.parent / f"{stem}_suggested.yaml"
+            suggested_path.write_text(yaml_text)
+            out["suggested_thresholds"] = str(suggested_path)
+    except Exception as e:  # noqa: BLE001
+        click.secho(f"  (auto-calibrate skipped: {e})", dim=True)
+    return out
+
+
+def _adopt_suggested_thresholds_and_rerun(config_path: Path, suggested_path: str,
+                                            *, with_vision: bool | None,
+                                            max_cost_usd: float | None) -> dict | None:
+    """Rewrite the project YAML's `thresholds_file:` to the suggested file, then
+    re-run the pipeline. Cache hits everything (only the threshold layer re-evaluates).
+    """
+    import yaml as _yaml
+    raw = _yaml.safe_load(config_path.read_text()) or {}
+    raw["thresholds_file"] = suggested_path
+    # Preserve the header comments
+    original = config_path.read_text()
+    header = "\n".join(line for line in original.splitlines() if line.startswith("#"))
+    body = _yaml.safe_dump(raw, sort_keys=False)
+    config_path.write_text((header + "\n\n" if header else "") + body)
+    click.secho(f"  → updated thresholds_file in {config_path.name} to use "
+                 f"{Path(suggested_path).name}", fg="cyan")
+    return _stage_run(config_path, with_vision=with_vision, max_cost_usd=max_cost_usd)
+
+
+def _stage_outcome(result: dict, *, with_vision: bool | None,
+                    max_cost_usd: float | None) -> None:
     _stage_banner(5, 5, "Outcome")
     n_pass = result.get('n_pass', 0)
     n_flag = result.get('n_flag', 0)
@@ -222,8 +286,24 @@ def _stage_outcome(result: dict) -> None:
     click.echo(f"  report:     ", nl=False); click.secho(str(result.get('report')), fg="cyan")
     click.echo(f"  viewer:     ", nl=False); click.secho(str(result.get('viewer')), fg="cyan")
     click.echo(f"  run report: ", nl=False); click.secho(str(result.get('run_report')), fg="cyan")
+
+    suggested = result.get("suggested_thresholds")
+    cohort_stats = result.get("cohort_stats")
+    if cohort_stats:
+        click.echo(f"  cohort stats: ", nl=False); click.secho(str(cohort_stats), fg="cyan")
+    if suggested:
+        click.echo(f"  suggested thresholds: ", nl=False)
+        click.secho(str(suggested), fg="cyan")
+        click.secho(
+            f"  ↑ derived from cohort percentiles; review before adopting "
+            f"(or pick [c]alibrate-and-re-run below to apply them now).",
+            dim=True)
     _hr()
-    ans = _prompt_choice("next", ["open", "serve", "done"], default="d")
+
+    choices = ["open", "serve", "done"]
+    if suggested:
+        choices = ["open", "serve", "calibrate-and-rerun", "done"]
+    ans = _prompt_choice("next", choices, default="d")
     if ans == "o":
         report = result.get("report")
         if report and Path(report).exists():
@@ -234,6 +314,23 @@ def _stage_outcome(result: dict) -> None:
         click.secho("  starting interactive viewer (Ctrl-C to stop)…", dim=True)
         if cfg_path_str:
             serve(load_config(Path(cfg_path_str)))
+    elif ans == "c" and suggested:
+        cfg_path_str = result.get("config_path")
+        if not cfg_path_str:
+            click.secho("  config path missing — can't re-run", fg="red")
+            return
+        new_result = _adopt_suggested_thresholds_and_rerun(
+            Path(cfg_path_str), suggested,
+            with_vision=with_vision, max_cost_usd=max_cost_usd,
+        )
+        if new_result is None:
+            click.secho("  re-run failed.", fg="red")
+            return
+        # Recurse once into a fresh outcome — auto-calibrate is skipped on the
+        # second pass (cohort_stats.json is already current; suggested wasn't
+        # changed by re-thresholding, and we don't want an infinite calibrate loop).
+        new_result["config_path"] = cfg_path_str
+        _stage_outcome(new_result, with_vision=with_vision, max_cost_usd=max_cost_usd)
 
 
 def run_wizard(root: Path, *, output_path: Path, name: str | None = None,
@@ -260,5 +357,9 @@ def run_wizard(root: Path, *, output_path: Path, name: str | None = None,
     if result is None:
         return 2
     result["config_path"] = str(accepted)
-    _stage_outcome(result)
+    # Auto-calibrate side files — cheap, always useful (cohort_stats.json feeds
+    # the next report's chip explanations; suggested YAML is opt-in).
+    calibrate_paths = _auto_calibrate(accepted)
+    result.update(calibrate_paths)
+    _stage_outcome(result, with_vision=with_vision, max_cost_usd=max_cost_usd)
     return 0
