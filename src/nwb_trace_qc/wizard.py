@@ -114,6 +114,188 @@ def _prompt_choice(prompt: str, choices: list[str], default: str | None = None) 
         click.secho(f"  please answer one of: {', '.join(choices)}", fg="red")
 
 
+# Order matters — used as the menu order in the interactive mapping prompt
+_FAMILIES_FOR_MAPPING = [
+    "spontaneous_hold",
+    "test_pulse",
+    "iv_subthreshold",
+    "ap_waveform",
+    "rest_firing",
+    "threshold_search",
+]
+
+_HEURISTIC_HINTS = [
+    # Order matters — first match wins. ap_waveform comes before threshold_search
+    # so "APThres" reads as an AP waveform metric, not a threshold scan; and
+    # iv_subthreshold/test_pulse come before threshold_search so "subthres" /
+    # "rheo" don't get mis-bucketed.
+    ("ap_waveform",      ["apwave", "spike", "apthres", "apdrop"]),
+    ("spontaneous_hold", ["hold", "rest_pot", "baseline", "starthold"]),
+    ("rest_firing",      ["firepat", "idrest", "fire", "rest"]),
+    ("iv_subthreshold",  ["iv", "hyperpol", "depol", "subthres"]),
+    ("test_pulse",       ["rseal", "rpip", "test", "rac", "ampl", "rheo"]),
+    ("threshold_search", ["thres", "idthr"]),
+]
+
+
+def _guess_family(token: str) -> str | None:
+    """Best-effort family guess from the token name. None when uncertain."""
+    lo = token.lower()
+    for fam, patterns in _HEURISTIC_HINTS:
+        if any(p in lo for p in patterns):
+            return fam
+    return None
+
+
+def _parse_unmapped_block(yaml_text: str) -> list[tuple[str, int]]:
+    """Extract (token, sweep_count) pairs from the `# ⚠ UNMAPPED tokens` comment
+    block in the YAML header. Returns [] if no such block is present."""
+    import re as _re
+    out: list[tuple[str, int]] = []
+    in_block = False
+    for line in yaml_text.splitlines():
+        if "UNMAPPED tokens" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if not line.startswith("#"):
+            break
+        # Skip non-token lines inside the block (the "Add these to…" footer)
+        m = _re.match(r"#\s+(\S+)\s+\((\d+)\s+sweeps?\)", line)
+        if m:
+            out.append((m.group(1), int(m.group(2))))
+    return out
+
+
+def _interactive_map_unmapped(output_path: Path) -> bool:
+    """Walk the user through assigning each unmapped stimulus token to a family.
+
+    Reads the YAML on disk, surfaces every token in the UNMAPPED block, prompts
+    once per token with a heuristic-derived default, then rewrites the YAML
+    with the new assignments folded into `stimulus_protocols:` and the
+    `# ⚠ UNMAPPED` block trimmed to whatever the user left unassigned.
+
+    Returns True if any assignment was made (so the caller can re-display).
+    """
+    import yaml as _yaml
+
+    text = output_path.read_text()
+    unmapped = _parse_unmapped_block(text)
+    if not unmapped:
+        click.secho("  no UNMAPPED tokens found in the YAML header — nothing to map.",
+                    dim=True)
+        return False
+
+    # Split file into header (comments + blank line) and body (YAML proper)
+    header_lines, body_lines, in_body = [], [], False
+    for line in text.splitlines():
+        if not in_body and (line.startswith("#") or line.strip() == ""):
+            header_lines.append(line)
+        else:
+            in_body = True
+            body_lines.append(line)
+    body = "\n".join(body_lines)
+    cfg = _yaml.safe_load(body) or {}
+    families = cfg.get("stimulus_protocols") or {}
+    # Ensure every canonical family slot exists so we can append cleanly
+    for fam in _FAMILIES_FOR_MAPPING:
+        families.setdefault(fam, [])
+
+    click.secho(
+        f"\n  Interactive mapping: {len(unmapped)} unmapped token(s). For each "
+        f"token, choose a family number or 0 to leave unmapped.",
+        fg="cyan", bold=True)
+    click.secho("    Tip: any letter that isn't a number cancels mapping for that token.",
+                dim=True)
+
+    assigned: dict[str, str] = {}
+    for token, n_sweeps in unmapped:
+        guess = _guess_family(token)
+        guess_idx = (_FAMILIES_FOR_MAPPING.index(guess) + 1) if guess in _FAMILIES_FOR_MAPPING else 0
+        click.echo("")
+        click.secho(f"  {token}", bold=True, nl=False)
+        click.secho(f"  ({n_sweeps} sweeps)", dim=True)
+        for i, fam in enumerate(_FAMILIES_FOR_MAPPING, start=1):
+            tag = "  ← suggested" if guess == fam else ""
+            click.echo(f"    {i}) {fam}{tag}")
+        click.echo(f"    0) skip — leave as unmapped")
+        default_str = str(guess_idx) if guess_idx else "0"
+        raw = click.prompt(f"  assign {token}",
+                            default=default_str, show_default=True).strip()
+        try:
+            choice = int(raw)
+        except ValueError:
+            click.secho(f"    cancelled — {token} remains unmapped.", dim=True)
+            continue
+        if not (0 <= choice <= len(_FAMILIES_FOR_MAPPING)):
+            click.secho(f"    out of range — {token} remains unmapped.", dim=True)
+            continue
+        if choice == 0:
+            continue
+        fam = _FAMILIES_FOR_MAPPING[choice - 1]
+        if token not in families[fam]:
+            families[fam].append(token)
+        assigned[token] = fam
+
+    if not assigned:
+        click.secho("\n  no tokens were mapped — YAML unchanged.", dim=True)
+        return False
+
+    # Rebuild the YAML body with the updated families. Trim the UNMAPPED block
+    # to whatever the user left unassigned (purely cosmetic — the YAML body is
+    # what actually drives behavior).
+    cfg["stimulus_protocols"] = families
+    new_body = _yaml.safe_dump(cfg, sort_keys=False)
+
+    remaining = [(t, n) for t, n in unmapped if t not in assigned]
+    new_header = _trim_unmapped_block(header_lines, assigned, remaining)
+
+    output_path.write_text("\n".join(new_header) + "\n" + new_body)
+    click.secho(
+        f"\n  ✓ updated {output_path.name}: assigned {len(assigned)} token(s); "
+        f"{len(remaining)} still unmapped.",
+        fg="green", bold=True)
+    if assigned:
+        for token, fam in assigned.items():
+            click.secho(f"      {token} → {fam}", dim=True)
+    return True
+
+
+def _trim_unmapped_block(header_lines: list[str], assigned: dict[str, str],
+                          remaining: list[tuple[str, int]]) -> list[str]:
+    """Rewrite the `# ⚠ UNMAPPED tokens` comment block to reflect only the still-
+    unmapped tokens. Other header lines pass through unchanged.
+    """
+    out: list[str] = []
+    in_block = False
+    skipping_listing = False
+    for line in header_lines:
+        if "UNMAPPED tokens" in line:
+            in_block = True
+            if remaining:
+                out.append(f"# ⚠ UNMAPPED tokens ({len(remaining)} remaining):")
+                for token, n in remaining:
+                    out.append(f"#   {token}  ({n} sweeps)")
+                out.append("#")
+                out.append("# Add these to the appropriate family under stimulus_protocols: below.")
+                out.append("#")
+            else:
+                out.append("# All discovered stimulus tokens are now mapped to a family.")
+                out.append("#")
+            skipping_listing = True
+            continue
+        if skipping_listing:
+            # Skip the original token listing + "Add these to" footer
+            if line.startswith("#"):
+                continue
+            else:
+                skipping_listing = False
+                in_block = False
+        out.append(line)
+    return out
+
+
 def _stage_inspect(root: Path) -> bool:
     from .inspect import inspect_root, render_terminal
     _stage_banner(1, 5, "Inspect")
@@ -138,21 +320,28 @@ def _stage_propose(root: Path, output_path: Path,
         click.secho(f"  →  {output_path}", dim=True)
         _hr()
         text = output_path.read_text()
-        if "⚠ UNMAPPED" in text:
+        has_unmapped = "⚠ UNMAPPED" in text
+        if has_unmapped:
             click.secho(
                 "  ⚠ Some stimulus protocols in your NWBs aren't mapped to a family.\n"
-                "    Look for the 'UNMAPPED tokens' block below and edit\n"
-                "    stimulus_protocols: to slot them into the right families\n"
-                "    before accepting — otherwise qc_protocol_coverage will be\n"
+                "    Pick [m]ap-unmapped below to walk through them one by one\n"
+                "    (with heuristic-based suggestions), or [e]dit to open the\n"
+                "    YAML in $EDITOR. Otherwise qc_protocol_coverage will be\n"
                 "    False for every cell.",
                 fg="yellow", bold=True)
         click.echo(text)
         _hr()
-        ans = _prompt_choice("review", ["accept", "edit", "quit"], default="a")
+        choices = ["accept", "edit", "quit"]
+        if has_unmapped:
+            choices = ["accept", "map-unmapped", "edit", "quit"]
+        ans = _prompt_choice("review", choices, default="a")
         if ans == "a":
             return output_path
         if ans == "q":
             return None
+        if ans == "m":
+            _interactive_map_unmapped(output_path)
+            continue   # re-display the updated YAML and re-prompt
         # edit
         edited = click.edit(filename=str(output_path))
         if edited is None:

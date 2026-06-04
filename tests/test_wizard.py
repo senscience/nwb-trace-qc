@@ -71,6 +71,105 @@ def test_wizard_happy_path(wizard_tree: Path, tmp_path: Path):
     assert rpt, f"no run_report.json under {tmp_path}; output:\n{result.output}"
 
 
+def test_unmapped_block_parser_and_heuristic():
+    """Parser pulls (token, n_sweeps) pairs out of the YAML comment block, and
+    the family-guess heuristic resolves the obvious cases."""
+    from nwb_trace_qc.wizard import _guess_family, _parse_unmapped_block
+
+    yaml_text = (
+        "# header\n"
+        "# ⚠ UNMAPPED tokens (3 unique):\n"
+        "#   SpikeRec  (74 sweeps)\n"
+        "#   HyperDePol  (36 sweeps)\n"
+        "#   ResetITC  (10 sweeps)\n"
+        "#\n"
+        "# Add these to the appropriate family under stimulus_protocols: below.\n"
+        "\n"
+        "project_name: foo\n"
+    )
+    parsed = _parse_unmapped_block(yaml_text)
+    assert parsed == [("SpikeRec", 74), ("HyperDePol", 36), ("ResetITC", 10)]
+
+    # Heuristic: confident cases get a guess; unrelated tokens get None
+    assert _guess_family("SpikeRec") == "ap_waveform"
+    assert _guess_family("HyperDePol") == "iv_subthreshold"
+    assert _guess_family("IDThres") == "threshold_search"
+    assert _guess_family("FirePattern") == "rest_firing"
+    assert _guess_family("RSealOpen") == "test_pulse"
+    # No obvious mapping → None (user picks 0 in interactive flow)
+    assert _guess_family("ResetITC") is None
+    assert _guess_family("xyz123") is None
+
+
+def test_interactive_mapping_updates_yaml_in_place(tmp_path: Path, monkeypatch):
+    """End-to-end: a YAML with UNMAPPED tokens gets rewritten with the chosen
+    families folded into stimulus_protocols and the UNMAPPED block trimmed."""
+    from nwb_trace_qc.wizard import _interactive_map_unmapped
+    yaml_text = (
+        "# header\n"
+        "# Stimulus protocols discovered by sampling your NWBs:\n"
+        "#   ap_waveform: APWaveform (54)\n"
+        "#\n"
+        "# ⚠ UNMAPPED tokens (2 unique):\n"
+        "#   SpikeRec  (74 sweeps)\n"
+        "#   FirePattern  (18 sweeps)\n"
+        "#\n"
+        "# Add these to the appropriate family under stimulus_protocols: below.\n"
+        "\n"
+        "stimulus_protocols:\n"
+        "  ap_waveform:\n"
+        "  - APWaveform\n"
+        "  rest_firing:\n"
+        "  - IDRest\n"
+        "project_name: foo\n"
+    )
+    yaml_path = tmp_path / "p.yaml"
+    yaml_path.write_text(yaml_text)
+
+    # Auto-answer the click.prompt for each token. SpikeRec's heuristic suggests
+    # ap_waveform (#4); FirePattern's heuristic suggests rest_firing (#5).
+    answers = iter(["4", "5"])
+    monkeypatch.setattr("click.prompt", lambda *a, **kw: next(answers))
+
+    changed = _interactive_map_unmapped(yaml_path)
+    assert changed is True
+
+    import yaml as _yaml
+    updated = _yaml.safe_load("\n".join(
+        line for line in yaml_path.read_text().splitlines() if not line.startswith("#")
+    ))
+    fams = updated["stimulus_protocols"]
+    assert "SpikeRec" in fams["ap_waveform"]
+    assert "FirePattern" in fams["rest_firing"]
+    # Original entries preserved
+    assert "APWaveform" in fams["ap_waveform"]
+    assert "IDRest" in fams["rest_firing"]
+    # Header trimmed — no more UNMAPPED block
+    assert "UNMAPPED tokens" not in yaml_path.read_text()
+    assert "All discovered stimulus tokens are now mapped" in yaml_path.read_text()
+
+
+def test_interactive_mapping_skip_leaves_unmapped(tmp_path: Path, monkeypatch):
+    """Pressing 0 skips a token — it should stay in the UNMAPPED block, not move."""
+    from nwb_trace_qc.wizard import _interactive_map_unmapped
+    yaml_text = (
+        "# ⚠ UNMAPPED tokens (1 unique):\n"
+        "#   ElecCal  (30 sweeps)\n"
+        "#\n"
+        "\n"
+        "stimulus_protocols: {}\n"
+    )
+    yaml_path = tmp_path / "p.yaml"
+    yaml_path.write_text(yaml_text)
+
+    monkeypatch.setattr("click.prompt", lambda *a, **kw: "0")
+    changed = _interactive_map_unmapped(yaml_path)
+    assert changed is False
+    body = yaml_path.read_text()
+    # Body unchanged when nothing was mapped
+    assert "ElecCal" in body
+
+
 def test_wizard_auto_writes_cohort_stats_and_suggested_thresholds(wizard_tree: Path,
                                                                      tmp_path: Path):
     """After a successful wizard run, cohort_stats.json (next to run_report.json)
