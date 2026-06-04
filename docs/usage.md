@@ -41,7 +41,9 @@ This walks you through five stages, pausing for confirmation between each:
 2. **Propose config** — generates the project YAML and shows it on screen. The YAML header includes a discovery block listing every stimulus protocol found in your NWBs, and a yellow `⚠ UNMAPPED tokens` callout when some don't match the default family map (this catches the "all cells fail qc_protocol_coverage" failure mode). `[a]ccept`, `[m]ap-unmapped` (only shown when unmapped tokens exist — walks you through each one with a heuristic-based suggestion and rewrites `stimulus_protocols:` in place), `[e]dit` in `$EDITOR`, or `[q]uit`.
 3. **Dry-run** — shows which NWBs were discovered and how many will be processed. `[r]un`, `[b]ack` to re-edit the config, or `[q]uit`.
 4. **Run** — executes the pipeline with a live `[stage 2/6 metric-compute] 142/2302 cells …  ETA 28m` progress line. After the pipeline completes, the wizard also auto-runs `calibrate` against the freshly computed cache and writes two side files: `cohort_stats.json` (consumed by future reports to add cohort-percentile context to triggered-metric chips) and `<thresholds_stem>_thresholds_suggested.yaml` (a thresholds YAML derived from cohort percentiles, ready to opt into).
-5. **Outcome** — prints the report paths, the cohort-stats and suggested-thresholds paths, and offers `[o]pen` report / `[s]erve` viewer / `[c]alibrate-and-re-run` / `[d]one`. Choosing `[c]` rewrites the project YAML's `thresholds_file:` to point at the suggested file and re-runs the pipeline immediately — the re-run is cache-fast (only the threshold layer re-evaluates), so you can compare bundled-defaults vs cohort-calibrated verdicts in seconds.
+5. **Outcome** — prints the report paths, the cohort-stats and suggested-thresholds paths, and offers `[o]pen` report / `[s]erve` viewer / `[t]une-thresholds` / `[c]alibrate-and-re-run` / `[d]one`. The default is `[d]one` so a first-time run can complete with bundled defaults by just pressing Enter. Choosing `[t]` walks you through every threshold rule interactively (see Step 6f below). Choosing `[c]` rewrites the project YAML's `thresholds_file:` to point at the auto-generated suggested file and re-runs the pipeline immediately — the re-run is cache-fast (only the threshold layer re-evaluates), so you can compare bundled-defaults vs cohort-calibrated verdicts in seconds.
+
+**Re-entering the wizard**: running `nwb-qc start <root>` a second time, with an existing project YAML and warm cache, the wizard detects the prior state and offers to skip straight to the outcome stage (so you can tune / serve / open the existing report without re-walking inspect → propose → dry-run → run). Pick `[r]estart` to do the full flow instead, or `[q]uit` to exit.
 
 Every step is reversible; nothing is committed to disk until you accept the config in step 2. After the run, every project artefact is exactly the same as if you'd run `init-config` / `list-cells` / `run` separately, so you can keep iterating with those commands afterward.
 
@@ -355,6 +357,24 @@ sample_42,pass,manually inspected — overshoot loss is end-of-recording artefac
 
 Overrides survive re-runs and threshold edits. They're applied last, so a human verdict trumps everything else.
 
+### 6f — Tune thresholds interactively (`nwb-qc tune`)
+
+```bash
+nwb-qc tune --config configs/mydata_project.yaml
+```
+
+Walks every threshold rule with cohort context. For each metric you see how many cells the rule currently affects, the cohort's P10/P50/P90/P99, and the calibrate-suggested value. At the top of the walk you can choose:
+
+- `[w]` walk through each metric one-by-one (per-rule prompts with `[Enter]=accept suggested` / type a number to override / type `s` to skip the metric)
+- `[a]` accept all suggested values in one keystroke
+- `[c]` cancel without writing
+
+After the walk, you see a preview of the new verdict counts and confirm before saving. Optionally re-runs the pipeline immediately — cache-fast (only thresholds + report re-evaluate).
+
+Flags: `--no-rerun` to save without prompting to re-run; `--only-failing` to walk only metrics with at least one cell currently affected (faster for iterating on a noisy cohort).
+
+The wizard's `[t]une-thresholds` option in the outcome stage calls into the same flow.
+
 ### 6e — Calibrate thresholds from the cohort itself
 
 The bundled `default_thresholds.yaml` is calibrated for cortical/hippocampal pyramidal neurons and assumes paired stimulus traces are available (so Rs is accurate). For other cell types, or for cohorts you're trying to understand fresh, you can derive thresholds from the cohort's own metric distributions:
@@ -451,6 +471,7 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 | `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without NWB I/O. |
 | `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (counts only). |
 | `nwb-qc calibrate --config <file>` | Suggest cohort-specific thresholds from cached metric distributions. Writes a `*_thresholds_suggested.yaml` you can opt into + a `cohort_stats.json` consumed by the next `run` to add percentile context to triggered chips. |
+| `nwb-qc tune --config <file> [--no-rerun] [--only-failing]` | Interactive threshold-tuning walk. Top-of-walk options: `[w]` per-rule, `[a]` accept-all-suggested, `[c]` cancel. After the walk previews new verdict counts and (optionally) re-runs the pipeline — cache-fast since metrics don't recompute. |
 | `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer — restricted to `flag` cells only; pass/fail rows stay in `qc_report.csv`. |
 | `nwb-qc -v <subcmd>` | DEBUG-level logging on stderr. |
 | `nwb-qc --version` | Print the package version. |

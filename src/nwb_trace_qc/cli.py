@@ -571,6 +571,27 @@ def calibrate_cmd(config_path: Path, output_path: Path | None):
     click.echo(f"      in {config_path} at {output_path.name} and re-run.")
 
 
+@main.command("tune")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--no-rerun", is_flag=True,
+              help="Save the tuned thresholds but skip the re-run prompt.")
+@click.option("--only-failing", is_flag=True,
+              help="Walk only the metrics currently failing/flagging on at least one cell.")
+def tune_cmd(config_path: Path, no_rerun: bool, only_failing: bool):
+    """Interactively tune each threshold rule.
+
+    For every metric, prompts you with the current rule, the cohort percentile
+    context, the calibrate-suggested value, and how many cells the rule
+    currently affects. Press [Enter] to accept the suggested default, type a
+    new number to override, or type 's' to skip the metric and keep its current
+    values. After the walk, previews the new verdict counts and (optionally)
+    re-runs the pipeline — the re-run is cache-fast (only threshold + report
+    stages re-evaluate).
+    """
+    from .tune import tune_thresholds_interactive
+    tune_thresholds_interactive(config_path, rerun=not no_rerun, only_failing=only_failing)
+
+
 @main.command("thresholds")
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Show how the current thresholds would classify cached cells.")

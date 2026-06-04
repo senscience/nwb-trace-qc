@@ -442,6 +442,32 @@ def _auto_calibrate(config_path: Path) -> dict[str, str | None]:
     return out
 
 
+def _reload_result_from_disk(config_path: Path, prev_result: dict) -> dict:
+    """After tune-and-rerun, the pipeline already ran and the report CSV is
+    fresh on disk. Recompute verdict counts so the next outcome prompt shows
+    the post-tune numbers. Falls back to the previous result if anything fails.
+    """
+    try:
+        import pandas as _pd
+        cfg = load_config(config_path)
+        if cfg.report_csv and cfg.report_csv.exists():
+            df = _pd.read_csv(cfg.report_csv)
+            counts = df["final_verdict"].value_counts().to_dict() if "final_verdict" in df.columns else {}
+            return {
+                **prev_result,
+                "n_cells": int(len(df)),
+                "n_pass": int(counts.get("pass", 0)),
+                "n_flag": int(counts.get("flag", 0)),
+                "n_fail": int(counts.get("fail", 0)),
+                "report": str(cfg.report_html),
+                "viewer": str(cfg.report_html.parent / "qc_viewer.html"),
+                "run_report": str(cfg.output_dir / "run_report.json"),
+            }
+    except Exception:
+        pass
+    return prev_result
+
+
 def _adopt_suggested_thresholds_and_rerun(config_path: Path, suggested_path: str,
                                             *, with_vision: bool | None,
                                             max_cost_usd: float | None) -> dict | None:
@@ -489,9 +515,9 @@ def _stage_outcome(result: dict, *, with_vision: bool | None,
             dim=True)
     _hr()
 
-    choices = ["open", "serve", "done"]
+    choices = ["open", "serve", "tune-thresholds", "done"]
     if suggested:
-        choices = ["open", "serve", "calibrate-and-rerun", "done"]
+        choices = ["open", "serve", "tune-thresholds", "calibrate-and-rerun", "done"]
     ans = _prompt_choice("next", choices, default="d")
     if ans == "o":
         report = result.get("report")
@@ -503,6 +529,25 @@ def _stage_outcome(result: dict, *, with_vision: bool | None,
         click.secho("  starting interactive viewer (Ctrl-C to stop)…", dim=True)
         if cfg_path_str:
             serve(load_config(Path(cfg_path_str)))
+    elif ans == "t":
+        cfg_path_str = result.get("config_path")
+        if not cfg_path_str:
+            click.secho("  config path missing — can't tune", fg="red")
+            return
+        from .tune import tune_thresholds_interactive
+        # The tune flow handles its own re-run + verdict preview. After it
+        # returns, drop the user back into the outcome stage so they can keep
+        # iterating (open report, tune again, serve viewer, etc.) — but rebuild
+        # the result dict from the freshly re-rendered report.
+        tune_thresholds_interactive(Path(cfg_path_str), rerun=True)
+        # After tuning's own re-run, rebuild the outcome from the on-disk report
+        # CSV so the user sees the updated verdict counts in the next prompt.
+        new_result = _reload_result_from_disk(Path(cfg_path_str), result)
+        new_result["config_path"] = cfg_path_str
+        # Suggested thresholds are stale after tuning — re-derive so the next
+        # [c]alibrate-and-rerun reflects the new defaults.
+        new_result.update(_auto_calibrate(Path(cfg_path_str)))
+        _stage_outcome(new_result, with_vision=with_vision, max_cost_usd=max_cost_usd)
     elif ans == "c" and suggested:
         cfg_path_str = result.get("config_path")
         if not cfg_path_str:
@@ -522,10 +567,79 @@ def _stage_outcome(result: dict, *, with_vision: bool | None,
         _stage_outcome(new_result, with_vision=with_vision, max_cost_usd=max_cost_usd)
 
 
+def _existing_cache_for(output_path: Path) -> Path | None:
+    """If a project YAML already exists at output_path AND its cache parquet has
+    rows, return the config Path so the wizard can offer a short-circuit. Otherwise None.
+    """
+    if not output_path.exists():
+        return None
+    try:
+        cfg = load_config(output_path)
+        if cfg.cache_path and cfg.cache_path.exists() and cfg.cache_path.stat().st_size > 0:
+            return output_path
+    except Exception:
+        pass
+    return None
+
+
+def _stage_short_circuit_prompt(config_path: Path) -> str:
+    """When an existing config + warm cache is detected, ask the user whether to
+    skip straight to tuning/outcome or restart from inspect.
+
+    Returns 'continue' (use existing state, skip to outcome), 'restart' (run
+    the full inspect → propose → dry-run → run flow), or 'quit'.
+    """
+    cfg = load_config(config_path)
+    click.secho("═" * 72, dim=True)
+    click.secho("Existing project detected", bold=True, fg="cyan")
+    _hr()
+    click.echo(f"  config:    {config_path}")
+    click.echo(f"  cache:     {cfg.cache_path}")
+    if cfg.report_csv and cfg.report_csv.exists():
+        click.echo(f"  report:    {cfg.report_html}")
+    _hr()
+    click.secho(
+        "  Skip straight to the outcome stage to tune thresholds, open the\n"
+        "  report, serve the viewer, or calibrate-and-rerun? Or restart from\n"
+        "  the inspect stage (re-builds the manifest + re-runs metric compute\n"
+        "  for any new NWBs — existing rows are still cache-served).",
+        dim=True)
+    return _prompt_choice("action",
+                            ["continue-existing", "restart", "quit"],
+                            default="c")
+
+
 def run_wizard(root: Path, *, output_path: Path, name: str | None = None,
                guess_tables: bool = True, with_vision: bool | None = None,
                max_cost_usd: float | None = None) -> int:
-    """Drive the five-stage interactive flow. Returns a CLI exit code."""
+    """Drive the five-stage interactive flow. Returns a CLI exit code.
+
+    Re-entry: if `output_path` already points at a project YAML whose cache has
+    rows, offer a short-circuit straight into the outcome stage (so the user
+    can tune thresholds / re-open report / re-serve viewer without re-walking
+    inspect → propose → dry-run → run).
+    """
+    existing = _existing_cache_for(output_path)
+    if existing is not None:
+        choice = _stage_short_circuit_prompt(existing)
+        if choice == "q":
+            return 1
+        if choice == "c":
+            # Reconstruct an outcome-stage `result` from the existing report on
+            # disk, then drop into the outcome prompt. No metric-compute, no
+            # report re-render — pure interactive.
+            result = _reload_result_from_disk(existing, {})
+            if not result:
+                click.secho("  couldn't reconstruct outcome from disk; "
+                             "running full pipeline instead.", fg="yellow")
+            else:
+                result["config_path"] = str(existing)
+                result.update(_auto_calibrate(existing))
+                _stage_outcome(result, with_vision=with_vision,
+                                max_cost_usd=max_cost_usd)
+                return 0
+        # 'r' → fall through to the full flow
+
     if not _stage_inspect(root):
         click.secho("aborted at inspect.", fg="red")
         return 1
