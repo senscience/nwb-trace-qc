@@ -525,6 +525,52 @@ def report_cmd(config_path: Path):
         click.echo(f"\nNext: open '{report}'")
 
 
+@main.command("calibrate")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--output", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Where to write the suggested thresholds YAML. "
+                   "Default: <project_thresholds_stem>_suggested.yaml next to the existing thresholds file.")
+def calibrate_cmd(config_path: Path, output_path: Path | None):
+    """Suggest QC thresholds from cohort statistics.
+
+    Reads the cache parquet (must have been written by a prior `nwb-qc run`),
+    computes per-metric percentiles across the cohort, and writes a suggested
+    thresholds YAML beside the existing one. Does NOT overwrite the existing
+    thresholds — you opt in by editing `thresholds_file:` in your project YAML.
+    """
+    from .cache import filter_for_version, load_cache
+    from .calibrate import suggest_thresholds, render_suggested_yaml, write_cohort_stats_json
+    from .thresholds import load_thresholds
+
+    cfg = load_config(config_path)
+    cache_df = filter_for_version(load_cache(cfg.cache_path))
+    if cache_df.empty:
+        raise click.ClickException(f"cache is empty at {cfg.cache_path}; run `nwb-qc run` first")
+    if cfg.thresholds_file is None or not cfg.thresholds_file.exists():
+        raise click.ClickException(f"thresholds_file not found: {cfg.thresholds_file}")
+
+    bundled = load_thresholds(cfg.thresholds_file)
+    suggested = suggest_thresholds(cache_df, bundled)
+    n_sources = len(cfg.nwb_sources)
+    yaml_text = render_suggested_yaml(suggested, n_cells=len(cache_df), source_count=n_sources)
+
+    if output_path is None:
+        stem = cfg.thresholds_file.stem
+        output_path = cfg.thresholds_file.parent / f"{stem}_suggested.yaml"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(yaml_text)
+
+    # Also persist a cohort_stats.json next to run_report.json so the next
+    # `nwb-qc run` decorates report chips with cohort-percentile context.
+    cohort_stats_path = cfg.output_dir / "cohort_stats.json"
+    write_cohort_stats_json(cache_df, cohort_stats_path)
+
+    click.echo(f"Wrote suggested thresholds: {output_path}")
+    click.echo(f"      cohort stats        : {cohort_stats_path}")
+    click.echo(f"Next: review the suggested YAML, then point thresholds_file:")
+    click.echo(f"      in {config_path} at {output_path.name} and re-run.")
+
+
 @main.command("thresholds")
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Show how the current thresholds would classify cached cells.")

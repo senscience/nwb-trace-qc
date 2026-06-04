@@ -18,11 +18,158 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
+import numpy as np
 import pynwb
+
+log = logging.getLogger(__name__)
+
+
+# SI prefix multipliers — used to normalize TimeSeries.unit strings to base SI.
+# Anything unrecognised → multiplier 1.0 with a one-time warning per file.
+_UNIT_PREFIXES: dict[str, float] = {
+    "":  1.0,
+    "k": 1e3, "K": 1e3,
+    "m": 1e-3, "M": 1e6,  # 'M' = mega only when followed by a base unit (megavolts irrelevant in ephys)
+    "u": 1e-6, "μ": 1e-6, "μ": 1e-6,
+    "n": 1e-9,
+    "p": 1e-12,
+    "f": 1e-15,
+}
+
+# Already-warned-about unit strings, to avoid spamming the log
+_WARNED_UNITS: set[str] = set()
+
+
+def _parse_unit_to_si(unit_str: str | None, base: str) -> float:
+    """Return a multiplier that converts a value in `unit_str` to base SI (`base`).
+
+    `base` is "V" (volts) or "A" (amperes) — the SI target.
+
+    Recognises the common ephys forms: `volts` / `V` / `mV` / `millivolts` /
+    `microvolts` / `uV` / `μV`, and analogous for current. Unknown / empty
+    units are treated as already-SI (multiplier = 1.0) with a single warning
+    per unknown string.
+    """
+    if not unit_str:
+        return 1.0
+    s = unit_str.strip()
+    s_lower = s.lower()
+
+    # Long forms
+    long_forms = {
+        ("volts", "V"): 1.0, ("volt", "V"): 1.0,
+        ("millivolts", "V"): 1e-3, ("millivolt", "V"): 1e-3,
+        ("microvolts", "V"): 1e-6, ("microvolt", "V"): 1e-6,
+        ("nanovolts", "V"): 1e-9, ("kilovolts", "V"): 1e3,
+        ("amperes", "A"): 1.0, ("ampere", "A"): 1.0, ("amps", "A"): 1.0, ("amp", "A"): 1.0,
+        ("milliamperes", "A"): 1e-3, ("milliamps", "A"): 1e-3,
+        ("microamperes", "A"): 1e-6, ("microamps", "A"): 1e-6,
+        ("nanoamperes", "A"): 1e-9, ("nanoamps", "A"): 1e-9,
+        ("picoamperes", "A"): 1e-12, ("picoamps", "A"): 1e-12,
+    }
+    if (s_lower, base) in long_forms:
+        return long_forms[(s_lower, base)]
+
+    # Short forms: <prefix><base>, e.g. "mV", "pA", "uA", "μV"
+    # Match by stripping a known base suffix and consulting the prefix table.
+    for base_char, base_target in (("V", "V"), ("v", "V"), ("A", "A"), ("a", "A")):
+        if base_target != base:
+            continue
+        if s.endswith(base_char):
+            prefix = s[:-1]
+            if prefix in _UNIT_PREFIXES:
+                # Guard: lower-case "m" is milli, capital "M" is mega — both fall into _UNIT_PREFIXES.
+                # For ephys we treat the empty prefix as 1.0 (bare "V" or "A").
+                return _UNIT_PREFIXES[prefix]
+            # Fall through to unknown
+
+    # Unknown: warn once, assume SI
+    if s not in _WARNED_UNITS:
+        _WARNED_UNITS.add(s)
+        log.warning("nwb_io: unrecognised unit string %r (expected SI form for %s); "
+                    "assuming value is already in base SI units.", s, base)
+    return 1.0
+
+
+def _ts_to_si(obj: Any, base: str) -> np.ndarray:
+    """Apply NWB's `data * conversion + offset`, then unit-prefix normalize.
+
+    Per the NWB spec the physical value of a sample is
+        physical_value = data * conversion + offset
+    where (conversion, offset, unit) live on the TimeSeries. Most files have
+    conversion=1.0 and offset=0.0 and use SI units, but the spec allows scaled
+    forms. This helper returns the trace as a 1-D float array in base SI.
+    """
+    raw = np.asarray(obj.data[:], dtype=np.float64).reshape(-1)
+    conv = float(getattr(obj, "conversion", 1.0) or 1.0)
+    offs = float(getattr(obj, "offset", 0.0) or 0.0)
+    unit_mult = _parse_unit_to_si(getattr(obj, "unit", None), base)
+    # If conversion already maps to SI (the modern NWB convention), unit_mult is
+    # typically 1.0 (unit was 'volts' / 'amperes'). When conversion=1.0 but unit
+    # is e.g. 'millivolts', unit_mult does the work. They compose multiplicatively.
+    return raw * (conv * unit_mult) + offs
+
+
+def voltage_si(obj: Any) -> np.ndarray:
+    """Return the trace in volts (SI), regardless of stored unit/conversion/offset."""
+    return _ts_to_si(obj, "V")
+
+
+def current_si(obj: Any) -> np.ndarray:
+    """Return the trace in amperes (SI), regardless of stored unit/conversion/offset."""
+    return _ts_to_si(obj, "A")
+
+
+def find_paired_stimulus(nwbfile: pynwb.NWBFile, acq_name: str, acq_obj: Any) -> Any | None:
+    """Return the stimulus TimeSeries paired with an acquisition, or None.
+
+    NWB stores stimuli in `nwbfile.stimulus`. Matching strategy in order of
+    confidence:
+      1. Exact name match: nwbfile.stimulus.get(acq_name)
+      2. Common suffix/prefix variants ('_stim', 'stim_', 'Stimulus')
+      3. Time-aligned match: same starting_time (±1 ms), same rate, same length
+
+    Returns None cleanly when nothing matches — callers can fall back.
+    """
+    stim_map = getattr(nwbfile, "stimulus", None) or {}
+    if not stim_map:
+        return None
+
+    # 1. Exact name
+    if acq_name in stim_map:
+        return stim_map[acq_name]
+
+    # 2. Common suffix/prefix variants
+    candidates = [
+        acq_name + "_stim",
+        "stim_" + acq_name,
+        acq_name.replace("ic__", "cc__", 1) if acq_name.startswith("ic__") else None,
+        acq_name + "Stimulus",
+        # Some labs prefix stimuli with a different family token: ccs__ vs ic__
+        acq_name.replace("ic__", "ccs__", 1) if acq_name.startswith("ic__") else None,
+    ]
+    for name in candidates:
+        if name and name in stim_map:
+            return stim_map[name]
+
+    # 3. Time-aligned match (last resort — O(n) over stim list)
+    acq_t0 = float(getattr(acq_obj, "starting_time", 0) or 0)
+    acq_rate = float(getattr(acq_obj, "rate", 0) or 0)
+    acq_len = int(acq_obj.data.shape[0]) if hasattr(acq_obj, "data") and acq_obj.data.shape else 0
+    for name, stim in stim_map.items():
+        stim_t0 = float(getattr(stim, "starting_time", 0) or 0)
+        stim_rate = float(getattr(stim, "rate", 0) or 0)
+        stim_len = int(stim.data.shape[0]) if hasattr(stim, "data") and stim.data.shape else 0
+        if (abs(stim_t0 - acq_t0) < 1e-3 and
+                abs(stim_rate - acq_rate) < 1e-6 and
+                stim_len == acq_len):
+            return stim
+    return None
 
 
 def is_zarr(path: Path) -> bool:

@@ -20,20 +20,138 @@ METRIC_TO_FAMILY: dict[str, str] = {
     # Spontaneous-hold-derived
     "vrest_mv":                       "spontaneous_hold",
     "vrest_drift_mv":                 "spontaneous_hold",
+    "vrest_session_drift_mv":         "spontaneous_hold",
     "baseline_rms_mv":                "spontaneous_hold",
-    # Test-pulse-derived (Rs, decay shape)
+    "holding_current_pa":             "spontaneous_hold",
+    "holding_current_drift_pa":       "spontaneous_hold",
+    # Test-pulse-derived (Rs, decay shape, edge artifact)
     "rs_mohm_initial":                "test_pulse",
     "rs_mohm_final":                  "test_pulse",
     "rs_drift_pct":                   "test_pulse",
+    "rs_session_drift_pct":           "test_pulse",
     "rac_decay_residual_rel":         "test_pulse",
+    "test_pulse_edge_overshoot_mv":   "test_pulse",
+    # IV-derived
+    "rin_mohm":                       "iv_subthreshold",
+    "rin_r2":                         "iv_subthreshold",
     # AP-waveform-derived
     "ap_amp_overshoot_mv":            "ap_waveform",
+    "ap_amp_overshoot_min_mv":        "ap_waveform",
+    "ap_amp_attenuation_frac":        "ap_waveform",
+    "ap_overshoot_session_drift_mv":  "ap_waveform",
     "ap_threshold_drift_mv":          "ap_waveform",
     "ap_amp_cv":                      "ap_waveform",
     "ap_failure_fraction":            "ap_waveform",
     # Long-sweep / firing-train metrics
     "vm_drift_within_sweep_mv_per_s": "rest_firing",
     "late_instability_index":         "rest_firing",
+}
+
+
+# Short human-readable descriptions surfaced as report tooltips + chip
+# explanations. Lives here so report.py and viewer can stay in sync.
+METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "vrest_mv": {
+        "what": "Resting membrane potential.",
+        "healthy": "−65 to −80 mV (cortical pyramidal); −55 to −90 mV more broadly.",
+    },
+    "vrest_drift_mv": {
+        "what": "Vrest delta from first to last spontaneous_hold sweep.",
+        "healthy": "|Δ| < 5 mV across a healthy recording.",
+    },
+    "vrest_session_drift_mv": {
+        "what": "Vrest delta between 2nd half and 1st half of the session (medians).",
+        "healthy": "|Δ| < 5 mV — early-warning seal degradation otherwise.",
+    },
+    "baseline_rms_mv": {
+        "what": "RMS noise of the spontaneous_hold baseline voltage.",
+        "healthy": "< 1 mV (mainly electrode/amplifier coupling).",
+    },
+    "rs_mohm_initial": {
+        "what": "Access resistance at the first test-pulse sweep.",
+        "healthy": "10–25 MΩ for somatic patch.",
+    },
+    "rs_mohm_final": {
+        "what": "Access resistance at the last test-pulse sweep.",
+        "healthy": "10–25 MΩ; ≤30 MΩ acceptable.",
+    },
+    "rs_drift_pct": {
+        "what": "Rs drift between first and last test-pulse sweep, as % of initial.",
+        "healthy": "< 20% over a typical session.",
+    },
+    "rs_session_drift_pct": {
+        "what": "Rs delta between 2nd half and 1st half (medians), as % of 1st-half.",
+        "healthy": "< 25% — seal stability check.",
+    },
+    "rin_mohm": {
+        "what": "Input resistance from subthreshold IV slope (V = Rin·I + offset).",
+        "healthy": "50–150 MΩ for cortical pyramidal.",
+    },
+    "rin_r2": {
+        "what": "R² of the linear fit used to derive Rin.",
+        "healthy": "> 0.9 (clean linear region).",
+    },
+    "holding_current_pa": {
+        "what": "Baseline (pre-step) holding current; reflects seal quality.",
+        "healthy": "|Ihld| < 100 pA at Vrest.",
+    },
+    "holding_current_drift_pa": {
+        "what": "Change in holding current from first to last sweep.",
+        "healthy": "|Δ| < 50 pA — creeping demand signals seal leak.",
+    },
+    "ap_amp_overshoot_mv": {
+        "what": "Median AP peak above 0 mV across all ap_waveform / rest_firing sweeps.",
+        "healthy": "+20 to +40 mV (cortical pyramidal); ≥10 mV minimally acceptable.",
+    },
+    "ap_amp_overshoot_min_mv": {
+        "what": "Worst-case AP overshoot across sweeps — catches sporadic attenuation.",
+        "healthy": "> 10 mV; < 0 mV is failure.",
+    },
+    "ap_amp_attenuation_frac": {
+        "what": "Fraction of all detected APs with overshoot < 15 mV.",
+        "healthy": "< 10% — sustained attenuation indicates cell decline.",
+    },
+    "ap_overshoot_session_drift_mv": {
+        "what": "AP overshoot delta between 2nd half and 1st half (medians).",
+        "healthy": "> −10 mV (i.e. < 10 mV drop). Sharp drop = cell dying.",
+    },
+    "ap_threshold_drift_mv": {
+        "what": "Voltage delta between first and last detected AP threshold.",
+        "healthy": "|Δ| < 5 mV.",
+    },
+    "ap_amp_cv": {
+        "what": "Coefficient of variation of AP peak amplitudes within a sweep.",
+        "healthy": "< 0.10 ideal, < 0.20 acceptable.",
+    },
+    "ap_failure_fraction": {
+        "what": "Fraction of dV/dt spike initiations that fail to reach overshoot.",
+        "healthy": "≈ 0 in healthy cells.",
+    },
+    "rac_decay_residual_rel": {
+        "what": "Relative residual of an exponential fit to the test-pulse recovery.",
+        "healthy": "< 0.05; > 0.15 indicates ringing/glitches.",
+    },
+    "vm_drift_within_sweep_mv_per_s": {
+        "what": "Max within-sweep Vm slope from spontaneous_hold (linear regression).",
+        "healthy": "< 0.5 mV/s; > 2 mV/s indicates active seal drift.",
+    },
+    "late_instability_index": {
+        "what": "Max ratio of late-quartile-to-early-quartile activity within a sweep, minus 1.",
+        "healthy": "≈ 0; > 1 = late-sweep runaway oscillation / firing.",
+    },
+    "test_pulse_edge_overshoot_mv": {
+        "what": "Max peak deviation in 5–10 ms after a test-pulse edge vs the 20–50 ms plateau.",
+        "healthy": "< 5 mV (smooth settling); > 20 mV = capacitive ringing / bad compensation.",
+    },
+    "qc_protocol_coverage": {
+        "what": "Boolean: NWB carries at least one sweep from each essential family "
+                "(spontaneous_hold, test_pulse, ap_waveform).",
+        "healthy": "True. False ⇒ stimulus_protocols mapping incomplete or recording cut short.",
+    },
+    "n_sweeps_total":   {"what": "Number of voltage acquisitions in the NWB.",     "healthy": "> 10 for a useful recording."},
+    "n_sweeps_clipped": {"what": "Sweeps that hit the voltage rails (±150 / +80 mV) for ≥1 ms.",
+                          "healthy": "0 — any clipped sweep is suspect."},
+    "n_sweeps_nan":     {"what": "Sweeps containing NaN samples.", "healthy": "0."},
 }
 
 # Synthetic non-metric triggers that surface in `triggered_metrics` lists but

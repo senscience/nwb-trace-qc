@@ -23,8 +23,15 @@ rs_drift_pct:
   fail_above: 30
   flag_above: 20
 
-# rin_mohm: not currently computed (requires stimulus-current pairing); omitted from thresholds
-# until the pipeline derives it from IV protocol acquisitions.
+rin_mohm:
+  # Cortical pyramidal: 50-150 MOhm typical. Very-low Rin → degraded cell (seal leak or
+  # damaged membrane); very-high Rin → cell-type mismatch or small soma.
+  fail_below: 20
+  flag_below: 40
+  flag_above: 500
+
+rin_r2:
+  flag_below: 0.85   # poor linear fit → suspect Rin value
 
 ap_amp_overshoot_mv:
   fail_below: 0          # no overshoot at all → fail
@@ -74,3 +81,51 @@ ap_amp_cv:
 late_instability_index:
   flag_above: 1.0
   fail_above: 3.0
+
+# ────────────────────────────────────────────────────────────
+# Whole-cell QC additions (v0.3.0)
+# Require paired CurrentClampStimulusSeries (Ihld, Rin, accurate Rs).
+# Session-drift metrics complement first/last drift with median-of-halves
+# (more robust to single-sweep outliers). Edge-overshoot catches the
+# capacitive-ringing pattern from experimenter sketches.
+# ────────────────────────────────────────────────────────────
+
+holding_current_pa:
+  fail_above: 200       # |Ihld| > 200 pA — major seal leak
+  flag_above: 100
+  fail_below: -200
+  flag_below: -100
+
+holding_current_drift_pa:
+  flag_above: 50
+  fail_above: 100
+
+vrest_session_drift_mv:
+  flag_above: 5         # >5 mV depolarisation between halves
+  fail_above: 10
+  flag_below: -10       # also flag large hyperpolarisation drift (less common)
+
+rs_session_drift_pct:
+  flag_above: 25
+  fail_above: 50
+
+ap_overshoot_session_drift_mv:
+  flag_below: -10       # overshoot drops > 10 mV across the session
+  fail_below: -20
+
+test_pulse_edge_overshoot_mv:
+  # Smooth "GOOD" test pulses show <5 mV at the step edge; sketched "BAD"
+  # examples show 15-25 mV of capacitive transient before settling.
+  flag_above: 8
+  fail_above: 20
+
+ap_amp_overshoot_min_mv:
+  # Per-sweep worst-case overshoot — flags the sketched "BAD too small" Fire Pattern
+  # even when the median is fine.
+  flag_below: 10
+  fail_below: 0
+
+ap_amp_attenuation_frac:
+  # Fraction of individual APs whose overshoot < 15 mV.
+  flag_above: 0.10
+  fail_above: 0.30

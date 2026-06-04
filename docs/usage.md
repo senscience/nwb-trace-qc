@@ -6,6 +6,12 @@ The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the i
 
 ---
 
+## What changed in v0.3.0
+
+If you're upgrading from v0.2.x: the pipeline now reads paired `CurrentClampStimulusSeries` from each NWB so Rs comes from the actual injected current (not the 50 pA assumption); Rin from IV protocol; holding current per sweep; and session-level degradation deltas (first half vs second half of the recording, median-based). Plus three sketch-aligned defect metrics: `test_pulse_edge_overshoot_mv`, `ap_amp_overshoot_min_mv`, `ap_amp_attenuation_frac`. `PIPELINE_VERSION` bumped to `0.3.0`, which invalidates the v0.2.x metric cache automatically — your first run on this version will recompute every NWB. The new `nwb-qc calibrate` subcommand suggests project-specific thresholds from cohort statistics.
+
+---
+
 ## Step 0 — Install
 
 One-time. Picks up `pynwb`, `efel`, `pandas`, `matplotlib`, `pyarrow`, `pyyaml`, `click`, `pydantic`, and both `anthropic` and `openai` SDKs (the vision judge is ready to use once you set an API key — no second install).
@@ -260,7 +266,11 @@ open /path/to/qc_output_mydata/qc_report.html
 - Table: one row per cell with verdict badge, triggered metrics as colored chips, and key metric values.
 - Click any row to expand → full metric table, inline trace thumbnails of the offending sweeps, a copyable override template, and (when present) vision-judge / human-override banners.
 
-Each triggered-metric chip now carries the implicated stimulus **family** as a small italic tag, e.g. `vrest_mv nan · spontaneous_hold`. And every expanded cell shows an **"Inspect these families:"** strip above the thumbnails listing the unique families implicated by that cell's triggers, plus an **"Inspect all sweeps in viewer →"** deep link to Step 5's interactive viewer (clicking it pre-selects the cell — requires `nwb-qc serve` to be running). The strip surfaces *which* sweep types are worth looking at instead of asking you to memorize the metric→family mapping.
+Each triggered-metric chip now carries the implicated stimulus **family** as a small italic tag, e.g. `vrest_mv nan · spontaneous_hold`. **Clicking any chip** expands a plain-English explanation underneath: what the metric measures, which sweeps drove the value (first/last from per-metric provenance fields like `vrest_mv_provenance`), the cohort percentile (when `cohort_stats.json` is present from `nwb-qc calibrate` — see Step 6e), and what a healthy range looks like.
+
+At the top of each expanded cell, a **health-summary card** shows the six canonical signals at a glance — Vrest, Rs (final), Rin, AP overshoot, Holding current, session drift — each coloured by its individual rule outcome. Below it, the **"Inspect these families:"** strip lists the unique families implicated by that cell's triggers plus an **"Inspect all sweeps in viewer →"** deep link to Step 5's interactive viewer (pre-selects the cell when `nwb-qc serve` is running).
+
+A new **"Failures by metric"** strip at the top of the report (visible whenever any cell has flag/fail triggers) lists every triggering metric with the cohort-wide count. Click any item to filter the table to just the cells affected — useful for telling apart "one bad metric is dragging the whole cohort down" (likely a threshold mis-calibration) from "several cells fail on multiple metrics" (real cell-quality issues).
 
 The static thumbnail PNG itself still stacks at most 3 representative sweeps. Within a matched family, picks are **stratified** (first / middle / last) rather than just the first 3, so a cell with 30 APWaveform sweeps shows sweeps #1, #15, #30 — easier to spot within-family drift at a glance.
 
@@ -345,6 +355,27 @@ sample_42,pass,manually inspected — overshoot loss is end-of-recording artefac
 
 Overrides survive re-runs and threshold edits. They're applied last, so a human verdict trumps everything else.
 
+### 6e — Calibrate thresholds from the cohort itself
+
+The bundled `default_thresholds.yaml` is calibrated for cortical/hippocampal pyramidal neurons and assumes paired stimulus traces are available (so Rs is accurate). For other cell types, or for cohorts you're trying to understand fresh, you can derive thresholds from the cohort's own metric distributions:
+
+```bash
+nwb-qc calibrate --config mydata_project.yaml
+```
+
+This reads the cache parquet (must have been written by a prior `nwb-qc run`), computes per-metric percentiles (P10 / P50 / P90 / P99), and writes a suggested-thresholds YAML next to your current one:
+
+```
+Wrote suggested thresholds: configs/mydata_thresholds_suggested.yaml
+      cohort stats        : qc_output_mydata/cohort_stats.json
+Next: review the suggested YAML, then point thresholds_file:
+      in mydata_project.yaml at mydata_thresholds_suggested.yaml and re-run.
+```
+
+The suggester is conservative: it only **tightens** `flag_above` rules (when the cohort's P90 is below the bundled default) and only **loosens** `flag_below` rules. `fail_*` rules are never auto-suggested — those should stay laboratory-judgment calls. Every suggestion shows both the bundled default and the cohort percentiles in YAML comments so you can sanity-check before adopting.
+
+`cohort_stats.json` is also a side-effect output: the next `nwb-qc run` finds it and decorates each triggered-metric chip in the report with cohort-percentile context (e.g. *"Cohort percentile ≈ P95; cohort range P10 -68 · P50 -65 · P90 -55"*). Run `nwb-qc calibrate` once after each substantive cohort change.
+
 ### 6c — Get a second opinion from an LLM vision judge (optional)
 
 Off by default. When enabled, only **`flag`-verdict cells** are sent to a vision model — cells that already clearly `pass` or `fail` by the rules don't trigger API calls, so cost is bounded (≤ `max_borderline_cells`, default 100).
@@ -419,6 +450,7 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 | `nwb-qc run --config <file> [--filter dataset=X] [--with-vision/--no-vision] [--max-cost-usd N] [--report-only]` | Full pipeline. |
 | `nwb-qc report --config <file>` | Re-render the HTML/CSV from the existing cache without NWB I/O. |
 | `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (counts only). |
+| `nwb-qc calibrate --config <file>` | Suggest cohort-specific thresholds from cached metric distributions. Writes a `*_thresholds_suggested.yaml` you can opt into + a `cohort_stats.json` consumed by the next `run` to add percentile context to triggered chips. |
 | `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer — restricted to `flag` cells only; pass/fail rows stay in `qc_report.csv`. |
 | `nwb-qc -v <subcmd>` | DEBUG-level logging on stderr. |
 | `nwb-qc --version` | Print the package version. |

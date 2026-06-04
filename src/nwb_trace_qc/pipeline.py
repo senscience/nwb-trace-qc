@@ -240,21 +240,29 @@ def run(
     n_compute = 0
 
     t0 = _stage_start("metric_compute", total=int(todo.shape[0]))
+    n_rs_fallback_cells = 0   # NWBs whose Rs computation fell back to the 50 pA hack
     if not report_only and not todo.empty:
         args_list = [(Path(row.nwb_path), row.nwb_sha256, cfg.stimulus_protocols)
                      for row in todo.itertuples(index=False)]
         batch: list[dict] = []
         total = len(args_list)
+
+        def _accumulate(metrics: dict) -> None:
+            nonlocal n_rs_fallback_cells
+            batch.append(metrics)
+            if metrics.get("compute_error"):
+                compute_errors.append({
+                    "nwb_path": metrics.get("nwb_path"),
+                    "nwb_sha256": metrics.get("nwb_sha256"),
+                    "error": metrics["compute_error"],
+                })
+            if int(metrics.get("n_rs_fallback_sweeps", 0) or 0) > 0:
+                n_rs_fallback_cells += 1
+
         if cfg.n_workers and cfg.n_workers > 1:
             with mp.Pool(cfg.n_workers) as pool:
                 for i, metrics in enumerate(pool.imap_unordered(_compute_one, args_list), start=1):
-                    batch.append(metrics)
-                    if metrics.get("compute_error"):
-                        compute_errors.append({
-                            "nwb_path": metrics.get("nwb_path"),
-                            "nwb_sha256": metrics.get("nwb_sha256"),
-                            "error": metrics["compute_error"],
-                        })
+                    _accumulate(metrics)
                     n_compute += 1
                     if progress_callback:
                         progress_callback("metric_compute", i, total)
@@ -264,13 +272,7 @@ def run(
         else:
             for i, a in enumerate(args_list, start=1):
                 metrics = _compute_one(a)
-                batch.append(metrics)
-                if metrics.get("compute_error"):
-                    compute_errors.append({
-                        "nwb_path": metrics.get("nwb_path"),
-                        "nwb_sha256": metrics.get("nwb_sha256"),
-                        "error": metrics["compute_error"],
-                    })
+                _accumulate(metrics)
                 n_compute += 1
                 if progress_callback:
                     progress_callback("metric_compute", i, total)
@@ -285,8 +287,17 @@ def run(
         "n_cache_hits": int(n_cache_hits),
         "n_workers": int(cfg.n_workers),
         "n_errors": len(compute_errors),
+        "n_rs_fallback": int(n_rs_fallback_cells),
         "n_total": int(todo.shape[0]),
     })
+    if n_rs_fallback_cells > 0:
+        log.warning(
+            "%d NWB(s) had no paired CurrentClampStimulusSeries — Rs values for "
+            "those test-pulse sweeps used the legacy 50 pA assumption. Verdicts on "
+            "rs_mohm_* and rs_drift_pct may be off by a multiplicative factor for "
+            "labs that use a different test-pulse amplitude.",
+            n_rs_fallback_cells,
+        )
 
     # ─── Stage 3: apply thresholds → per-cell verdicts ───────────
     t0 = _stage_start("thresholds", total=int(manifest.shape[0]))
@@ -405,13 +416,22 @@ def run(
 
     # ─── Stage 5: render report ──────────────────────────────────
     t0 = _stage_start("report")
+    cohort_stats_path = cfg.output_dir / "cohort_stats.json"
+    cohort_stats: dict | None = None
+    if cohort_stats_path.exists():
+        try:
+            cohort_stats = json.loads(cohort_stats_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            cohort_stats = None
     write_report(final, thumbs,
                  html_path=cfg.report_html,
                  csv_path=cfg.report_csv,
                  project_name=cfg.project_name,
                  pipeline_version=PIPELINE_VERSION,
                  thresholds_fp=str(cfg.thresholds_file),
-                 viewer_url=cfg.viewer_url)
+                 viewer_url=cfg.viewer_url,
+                 thresholds=thresholds,
+                 cohort_stats=cohort_stats)
     viewer_src = Path(__file__).parent / "templates" / "viewer.html"
     if viewer_src.exists():
         viewer_dst = cfg.report_html.parent / "qc_viewer.html"
