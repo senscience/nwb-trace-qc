@@ -16,6 +16,15 @@ from typing import Any
 import numpy as np
 import pynwb
 
+from .efel_features import (
+    EFEL_AP_AMPLITUDE,
+    EFEL_AP_AMPLITUDE_FROM_VBASE,
+    EFEL_AP_BEGIN_VOLTAGE,
+    EFEL_SPIKECOUNT,
+    EFEL_VOLTAGE_BASE,
+    efel_features_for_sweep,
+    feature_scalar,
+)
 from .nwb_io import current_si, find_paired_stimulus, open_nwb, voltage_si
 from .stimuli import StimulusFamilyMap
 
@@ -452,7 +461,160 @@ def _halve_session(values_and_names: list[tuple[float, str]]) -> tuple[list[floa
     return clean[:mid], clean[mid:]
 
 
-def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict[str, Any]:
+# ── eFEL-first wrappers ───────────────────────────────────────────
+# Each wrapper tries eFEL first; on None (eFEL absent, call raised, or no
+# usable feature value) falls back to our custom helper. The fallback count
+# bubbles up to the cell row as `n_efel_fallback`.
+
+def _efel_or_fallback_vrest_mv(voltage_v: np.ndarray, current_a: np.ndarray | None,
+                                  rate_hz: float, fallback_fn) -> tuple[float, bool]:
+    """Returns (value_in_volts, used_fallback). value_in_volts so the call site
+    can keep its existing `* 1000` scale-at-emit-time pattern."""
+    feats = efel_features_for_sweep(voltage_v, current_a, rate_hz,
+                                       features=[EFEL_VOLTAGE_BASE])
+    if feats is not None:
+        v = feature_scalar(feats.get(EFEL_VOLTAGE_BASE))
+        if not math.isnan(v):
+            return float(v) / 1000.0, False    # eFEL returns mV → back to V
+    return float(fallback_fn()), True
+
+
+def _efel_or_fallback_peak_overshoot_mv(voltage_v: np.ndarray, current_a: np.ndarray | None,
+                                          rate_hz: float, fallback_fn) -> tuple[float, bool]:
+    feats = efel_features_for_sweep(voltage_v, current_a, rate_hz,
+                                       features=[EFEL_AP_AMPLITUDE_FROM_VBASE, EFEL_VOLTAGE_BASE])
+    if feats is not None:
+        amps = feats.get(EFEL_AP_AMPLITUDE_FROM_VBASE)
+        vbase = feature_scalar(feats.get(EFEL_VOLTAGE_BASE))
+        if amps and not math.isnan(vbase):
+            # Peak overshoot in mV = vbase + median(AP_amplitude_from_voltagebase) (both eFEL-mV)
+            peak_mv = vbase + feature_scalar(amps)
+            if not math.isnan(peak_mv):
+                return float(peak_mv), False
+    return float(fallback_fn()), True
+
+
+def _efel_or_fallback_ap_threshold_mv(voltage_v: np.ndarray, current_a: np.ndarray | None,
+                                        rate_hz: float, fallback_fn) -> tuple[float, bool]:
+    feats = efel_features_for_sweep(voltage_v, current_a, rate_hz,
+                                       features=[EFEL_AP_BEGIN_VOLTAGE])
+    if feats is not None:
+        v = feature_scalar(feats.get(EFEL_AP_BEGIN_VOLTAGE))
+        if not math.isnan(v):
+            return float(v), False
+    return float(fallback_fn()), True
+
+
+def _efel_or_fallback_ap_amplitude_cv(voltage_v: np.ndarray, current_a: np.ndarray | None,
+                                         rate_hz: float, fallback_fn) -> tuple[float, bool]:
+    feats = efel_features_for_sweep(voltage_v, current_a, rate_hz,
+                                       features=[EFEL_AP_AMPLITUDE])
+    if feats is not None:
+        amps = feats.get(EFEL_AP_AMPLITUDE)
+        if amps and len(amps) >= 5:
+            arr = np.asarray(amps, dtype=np.float64)
+            arr = arr[np.isfinite(arr)]
+            if arr.size >= 5 and arr.mean() != 0:
+                return float(np.std(arr) / abs(arr.mean())), False
+    return float(fallback_fn()), True
+
+
+def _detect_bad_ending(
+    vrest_seq: list[tuple[float, int]],
+    rs_seq: list[tuple[float, int]],
+    overshoot_seq: list[tuple[float, int]],
+    n_total_sweeps: int,
+    *,
+    vrest_jump_mv: float = 0.010,        # 10 mV depolarisation past running median
+    rs_explosion_factor: float = 1.75,    # Rs grows >1.75x its running median
+    overshoot_floor_mv: float = 10.0,     # AP overshoot drops below this after a healthy run
+    overshoot_healthy_mv: float = 20.0,
+) -> tuple[int | None, str | None]:
+    """Detect the global sweep index where the recording started to degrade.
+
+    Each input list is the per-sweep stream of (value, global_sweep_index)
+    pairs for one of three quality channels: Vrest (V), Rs (MOhm),
+    AP overshoot (mV in mV, ie the trace-units returned by the AP picker).
+
+    Returns (cutoff_index, reason). cutoff_index is the FIRST bad sweep;
+    everything ≥ that index is post-degradation.
+
+    Guardrails:
+      - cutoffs in the first 30% of the recording are ignored (different
+        problem — cell wasn't healthy from the start)
+      - cutoffs in the last 5% are ignored (single tail glitch, not a pattern)
+    """
+    if n_total_sweeps < 6:
+        return None, None
+    min_idx = max(2, int(0.30 * n_total_sweeps))
+    max_idx = max(min_idx + 1, int(0.95 * n_total_sweeps))
+
+    candidates: list[tuple[int, str]] = []
+
+    # --- Vrest channel: first sweep depolarised vs running median ---
+    clean = [(v, i) for v, i in vrest_seq if not math.isnan(v)]
+    for k in range(2, len(clean)):
+        prev_vals = [v for v, _ in clean[:k]]
+        if not prev_vals:
+            continue
+        median_prev = float(np.median(prev_vals))
+        v_here, i_here = clean[k]
+        if v_here > median_prev + vrest_jump_mv:
+            candidates.append((i_here, "vrest_depolarisation"))
+            break
+
+    # --- Rs channel: first sweep that explodes vs running median ---
+    clean = [(v, i) for v, i in rs_seq if not math.isnan(v)]
+    for k in range(2, len(clean)):
+        prev_vals = [v for v, _ in clean[:k] if v > 0]
+        if not prev_vals:
+            continue
+        median_prev = float(np.median(prev_vals))
+        v_here, i_here = clean[k]
+        if median_prev > 0 and v_here > rs_explosion_factor * median_prev:
+            candidates.append((i_here, "rs_explosion"))
+            break
+
+    # --- AP overshoot channel: first sweep below floor after healthy run ---
+    clean = [(v, i) for v, i in overshoot_seq if not math.isnan(v)]
+    saw_healthy = False
+    for v_here, i_here in clean:
+        if v_here >= overshoot_healthy_mv:
+            saw_healthy = True
+        elif saw_healthy and v_here < overshoot_floor_mv:
+            candidates.append((i_here, "ap_collapse"))
+            break
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda x: x[0])     # earliest cutoff wins
+    cutoff_idx, reason = candidates[0]
+    if cutoff_idx < min_idx or cutoff_idx > max_idx:
+        return None, None
+    return cutoff_idx, reason
+
+
+def _filter_before(stream: list, cutoff_idx: int | None,
+                     family_of_interest: bool = True) -> list:
+    """Drop entries whose global sweep index >= cutoff_idx. When cutoff_idx is
+    None or family_of_interest is False, pass through unchanged.
+
+    `stream` items can be either (value, name) or (value, name, global_idx) —
+    handled by tuple length so we don't have to alter every accumulator shape.
+    """
+    if cutoff_idx is None or not family_of_interest:
+        return stream
+    out = []
+    for item in stream:
+        if len(item) >= 3 and item[2] >= cutoff_idx:
+            continue
+        out.append(item)
+    return out
+
+
+def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
+                      *, use_efel: bool = True, trim_bad_ending: bool = True) -> dict[str, Any]:
     """Open one NWB, compute per-cell QC metrics, return a flat dict.
 
     Always returns a row even when computations fail — failure modes show up as
@@ -495,8 +657,13 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
         "test_pulse_edge_overshoot_mv": float("nan"),
         "ap_amp_overshoot_min_mv": float("nan"),
         "ap_amp_attenuation_frac": float("nan"),
+        # Bad-ending detection (v0.4.0)
+        "bad_ending_at_sweep": float("nan"),
+        "n_sweeps_trimmed": 0,
+        "bad_ending_reason": None,
         # Bookkeeping
         "n_rs_fallback_sweeps": 0,
+        "n_efel_fallback_sweeps": 0,
         "compute_error": None,
     }
     try:
@@ -523,8 +690,9 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
             per_ap_amplitudes: list[float] = []
             # Bookkeeping
             rs_fallback_used = 0
+            efel_fallback_used = 0
 
-            for name, obj in _iter_current_clamp_acqs(nwbfile):
+            for sweep_idx, (name, obj) in enumerate(_iter_current_clamp_acqs(nwbfile)):
                 n_total += 1
                 rate = _rate(obj)
                 trace = voltage_si(obj)
@@ -544,54 +712,99 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
                 # Holding current — applies to every sweep that has a paired stim
                 ih = _holding_current_pa(stim_a, rate)
                 if not math.isnan(ih):
-                    holding_currents.append((ih, name))
+                    holding_currents.append((ih, name, sweep_idx))
 
                 if family == "spontaneous_hold":
-                    sponhold_vrest.append((_median_last_seconds(trace, rate, 0.5), name))
-                    baseline_rms_vals.append(_rms(trace) * 1000.0)
+                    # eFEL voltage_base on the steady-state baseline; falls back
+                    # to our last-500ms median when eFEL is absent / refuses.
+                    if use_efel:
+                        vrest_v, used_fb = _efel_or_fallback_vrest_mv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _median_last_seconds(trace, rate, 0.5))
+                    else:
+                        vrest_v, used_fb = _median_last_seconds(trace, rate, 0.5), False
+                    sponhold_vrest.append((vrest_v, name, sweep_idx))
+                    if used_fb:
+                        efel_fallback_used += 1
+                    baseline_rms_vals.append((_rms(trace) * 1000.0, sweep_idx))
                     s = _vm_drift_slope_mv_per_s(trace, rate)
                     if not math.isnan(s):
-                        vm_drift_slopes.append(abs(s))
+                        vm_drift_slopes.append((abs(s), sweep_idx))
                 elif family == "test_pulse":
                     rs_val, used_fallback = _rs_from_test_pulse_mohm(trace, rate, stim_a)
                     if not math.isnan(rs_val):
-                        rs_estimates.append((rs_val, name))
+                        rs_estimates.append((rs_val, name, sweep_idx))
                     if used_fallback:
                         rs_fallback_used += 1
                     r = _step_decay_residual_rel(trace, rate)
                     if not math.isnan(r):
-                        decay_residuals.append(r)
+                        decay_residuals.append((r, sweep_idx))
                     e = _test_pulse_edge_overshoot_mv(trace, rate, stim_a)
                     if not math.isnan(e):
-                        edge_overshoots.append(e)
+                        edge_overshoots.append((e, sweep_idx))
                 elif family == "ap_waveform":
-                    overshoot = _peak_overshoot_mv(trace)
-                    ap_overshoots.append((overshoot, name))
-                    per_ap_amplitudes.append(overshoot)
-                    th = _ap_threshold_mv(trace, rate)
+                    if use_efel:
+                        overshoot, used_fb = _efel_or_fallback_peak_overshoot_mv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _peak_overshoot_mv(trace))
+                        if used_fb:
+                            efel_fallback_used += 1
+                    else:
+                        overshoot = _peak_overshoot_mv(trace)
+                    ap_overshoots.append((overshoot, name, sweep_idx))
+                    per_ap_amplitudes.append((overshoot, sweep_idx))
+                    if use_efel:
+                        th, used_fb = _efel_or_fallback_ap_threshold_mv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _ap_threshold_mv(trace, rate))
+                        if used_fb:
+                            efel_fallback_used += 1
+                    else:
+                        th = _ap_threshold_mv(trace, rate)
                     if not math.isnan(th):
-                        ap_thresholds.append((th, name))
+                        ap_thresholds.append((th, name, sweep_idx))
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
-                        failure_fractions.append(f)
+                        failure_fractions.append((f, sweep_idx))
                     li = _late_instability_index(trace, rate)
                     if not math.isnan(li):
-                        late_instabilities.append(li)
+                        late_instabilities.append((li, sweep_idx))
                 elif family == "rest_firing":
-                    overshoot = _peak_overshoot_mv(trace)
-                    per_ap_amplitudes.append(overshoot)
-                    th = _ap_threshold_mv(trace, rate)
+                    if use_efel:
+                        overshoot, used_fb = _efel_or_fallback_peak_overshoot_mv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _peak_overshoot_mv(trace))
+                        if used_fb:
+                            efel_fallback_used += 1
+                    else:
+                        overshoot = _peak_overshoot_mv(trace)
+                    per_ap_amplitudes.append((overshoot, sweep_idx))
+                    if use_efel:
+                        th, used_fb = _efel_or_fallback_ap_threshold_mv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _ap_threshold_mv(trace, rate))
+                        if used_fb:
+                            efel_fallback_used += 1
+                    else:
+                        th = _ap_threshold_mv(trace, rate)
                     if not math.isnan(th):
-                        ap_thresholds.append((th, name))
+                        ap_thresholds.append((th, name, sweep_idx))
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
-                        failure_fractions.append(f)
-                    cv = _ap_amplitude_cv(trace, rate)
+                        failure_fractions.append((f, sweep_idx))
+                    if use_efel:
+                        cv, used_fb = _efel_or_fallback_ap_amplitude_cv(
+                            trace, stim_a, rate,
+                            fallback_fn=lambda: _ap_amplitude_cv(trace, rate))
+                        if used_fb:
+                            efel_fallback_used += 1
+                    else:
+                        cv = _ap_amplitude_cv(trace, rate)
                     if not math.isnan(cv):
-                        ap_amp_cvs.append(cv)
+                        ap_amp_cvs.append((cv, sweep_idx))
                     li = _late_instability_index(trace, rate)
                     if not math.isnan(li):
-                        late_instabilities.append(li)
+                        late_instabilities.append((li, sweep_idx))
                 elif family == "iv_subthreshold":
                     pair = _iv_subthreshold_pair(stim_a, trace, rate)
                     if pair is not None:
@@ -601,23 +814,55 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
             out["n_sweeps_clipped"] = n_clip
             out["n_sweeps_nan"] = n_nan
             out["n_rs_fallback_sweeps"] = rs_fallback_used
+            out["n_efel_fallback_sweeps"] = efel_fallback_used
+
+            # ── Bad-ending detection + auto-trim (v0.4.0) ───────────────
+            # Convert volts → mV for the AP overshoot stream so the detector's
+            # mV-scaled thresholds match.
+            vrest_seq = [(v, idx) for v, _name, idx in sponhold_vrest]
+            rs_seq    = [(v, idx) for v, _name, idx in rs_estimates]
+            ov_seq    = [(v, idx) for v, _name, idx in ap_overshoots]
+            cutoff_idx, reason = _detect_bad_ending(vrest_seq, rs_seq, ov_seq, n_total) \
+                                  if trim_bad_ending else (None, None)
+            if cutoff_idx is not None:
+                out["bad_ending_at_sweep"] = int(cutoff_idx)
+                out["bad_ending_reason"] = reason
+                out["n_sweeps_trimmed"] = int(n_total - cutoff_idx)
+                # Filter every per-sweep accumulator to keep only entries strictly
+                # before the cutoff. Items here are 3-tuples (..., sweep_idx) or
+                # 2-tuples (value, sweep_idx) — _filter_before handles both.
+                sponhold_vrest = _filter_before(sponhold_vrest, cutoff_idx)
+                rs_estimates = _filter_before(rs_estimates, cutoff_idx)
+                ap_overshoots = _filter_before(ap_overshoots, cutoff_idx)
+                ap_thresholds = _filter_before(ap_thresholds, cutoff_idx)
+                holding_currents = _filter_before(holding_currents, cutoff_idx)
+                baseline_rms_vals = _filter_before(baseline_rms_vals, cutoff_idx)
+                vm_drift_slopes = _filter_before(vm_drift_slopes, cutoff_idx)
+                decay_residuals = _filter_before(decay_residuals, cutoff_idx)
+                edge_overshoots = _filter_before(edge_overshoots, cutoff_idx)
+                failure_fractions = _filter_before(failure_fractions, cutoff_idx)
+                ap_amp_cvs = _filter_before(ap_amp_cvs, cutoff_idx)
+                late_instabilities = _filter_before(late_instabilities, cutoff_idx)
+                per_ap_amplitudes = _filter_before(per_ap_amplitudes, cutoff_idx)
 
             # Vrest + session drift
-            vrest_vals = [v for v, _ in sponhold_vrest if not math.isnan(v)]
+            vrest_vals = [item[0] for item in sponhold_vrest if not math.isnan(item[0])]
             if vrest_vals:
                 out["vrest_mv"] = float(np.median(vrest_vals) * 1000.0)
                 if len(vrest_vals) >= 2:
                     out["vrest_drift_mv"] = float((vrest_vals[-1] - vrest_vals[0]) * 1000.0)
-                a, b = _halve_session(sponhold_vrest)
+                a, b = _halve_session([(item[0], item[1]) for item in sponhold_vrest])
                 if a and b:
                     out["vrest_session_drift_mv"] = float((np.median(b) - np.median(a)) * 1000.0)
-                out["vrest_mv_provenance"] = json.dumps(_provenance_first_last(sponhold_vrest))
+                out["vrest_mv_provenance"] = json.dumps(
+                    _provenance_first_last([(item[0], item[1]) for item in sponhold_vrest])
+                )
 
             if baseline_rms_vals:
-                out["baseline_rms_mv"] = float(np.median(baseline_rms_vals))
+                out["baseline_rms_mv"] = float(np.median([item[0] for item in baseline_rms_vals]))
 
             # Rs + session drift
-            rs_clean = [(v, n) for v, n in rs_estimates if not math.isnan(v)]
+            rs_clean = [item for item in rs_estimates if not math.isnan(item[0])]
             if rs_clean:
                 out["rs_mohm_initial"] = float(rs_clean[0][0])
                 out["rs_mohm_final"] = float(rs_clean[-1][0])
@@ -625,12 +870,14 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
                     out["rs_drift_pct"] = float(
                         (out["rs_mohm_final"] - out["rs_mohm_initial"]) / out["rs_mohm_initial"] * 100.0
                     )
-                a, b = _halve_session(rs_estimates)
+                a, b = _halve_session([(item[0], item[1]) for item in rs_estimates])
                 if a and b and np.median(a) > 0:
                     out["rs_session_drift_pct"] = float(
                         (np.median(b) - np.median(a)) / np.median(a) * 100.0
                     )
-                out["rs_mohm_provenance"] = json.dumps(_provenance_first_last(rs_estimates))
+                out["rs_mohm_provenance"] = json.dumps(
+                    _provenance_first_last([(item[0], item[1]) for item in rs_estimates])
+                )
 
             # Rin
             if iv_pairs:
@@ -639,44 +886,46 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap) -> dict
                 out["rin_r2"] = r2
 
             # Holding current
-            ih_vals = [v for v, _ in holding_currents if not math.isnan(v)]
+            ih_vals = [item[0] for item in holding_currents if not math.isnan(item[0])]
             if ih_vals:
                 out["holding_current_pa"] = float(np.median(ih_vals))
                 if len(ih_vals) >= 2:
                     out["holding_current_drift_pa"] = float(ih_vals[-1] - ih_vals[0])
 
             # AP overshoot + session drift + worst-sweep + attenuation fraction
-            overshoot_vals = [v for v, _ in ap_overshoots if not math.isnan(v)]
+            overshoot_vals = [item[0] for item in ap_overshoots if not math.isnan(item[0])]
             if overshoot_vals:
                 out["ap_amp_overshoot_mv"] = float(np.median(overshoot_vals))
                 out["ap_amp_overshoot_min_mv"] = float(np.min(overshoot_vals))
-                a, b = _halve_session(ap_overshoots)
+                a, b = _halve_session([(item[0], item[1]) for item in ap_overshoots])
                 if a and b:
                     out["ap_overshoot_session_drift_mv"] = float(np.median(b) - np.median(a))
-                out["ap_amp_overshoot_mv_provenance"] = json.dumps(_provenance_first_last(ap_overshoots))
+                out["ap_amp_overshoot_mv_provenance"] = json.dumps(
+                    _provenance_first_last([(item[0], item[1]) for item in ap_overshoots])
+                )
             if per_ap_amplitudes:
-                attenuated = sum(1 for v in per_ap_amplitudes if not math.isnan(v) and v < 15.0)
-                total = sum(1 for v in per_ap_amplitudes if not math.isnan(v))
+                attenuated = sum(1 for v, _idx in per_ap_amplitudes if not math.isnan(v) and v < 15.0)
+                total = sum(1 for v, _idx in per_ap_amplitudes if not math.isnan(v))
                 if total > 0:
                     out["ap_amp_attenuation_frac"] = float(attenuated / total)
 
             if len(ap_thresholds) >= 2:
-                th_clean = [v for v, _ in ap_thresholds if not math.isnan(v)]
+                th_clean = [item[0] for item in ap_thresholds if not math.isnan(item[0])]
                 out["ap_threshold_drift_mv"] = float(th_clean[-1] - th_clean[0])
 
             # Visual-defect reductions
             if decay_residuals:
-                out["rac_decay_residual_rel"] = float(np.median(decay_residuals))
+                out["rac_decay_residual_rel"] = float(np.median([item[0] for item in decay_residuals]))
             if vm_drift_slopes:
-                out["vm_drift_within_sweep_mv_per_s"] = float(np.max(vm_drift_slopes))
+                out["vm_drift_within_sweep_mv_per_s"] = float(np.max([item[0] for item in vm_drift_slopes]))
             if failure_fractions:
-                out["ap_failure_fraction"] = float(np.median(failure_fractions))
+                out["ap_failure_fraction"] = float(np.median([item[0] for item in failure_fractions]))
             if ap_amp_cvs:
-                out["ap_amp_cv"] = float(np.median(ap_amp_cvs))
+                out["ap_amp_cv"] = float(np.median([item[0] for item in ap_amp_cvs]))
             if late_instabilities:
-                out["late_instability_index"] = float(np.max(late_instabilities))
+                out["late_instability_index"] = float(np.max([item[0] for item in late_instabilities]))
             if edge_overshoots:
-                out["test_pulse_edge_overshoot_mv"] = float(np.max(edge_overshoots))
+                out["test_pulse_edge_overshoot_mv"] = float(np.max([item[0] for item in edge_overshoots]))
 
             # Coverage
             essential = {"spontaneous_hold", "test_pulse", "ap_waveform"}

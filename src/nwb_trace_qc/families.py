@@ -152,6 +152,20 @@ METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "n_sweeps_clipped": {"what": "Sweeps that hit the voltage rails (±150 / +80 mV) for ≥1 ms.",
                           "healthy": "0 — any clipped sweep is suspect."},
     "n_sweeps_nan":     {"what": "Sweeps containing NaN samples.", "healthy": "0."},
+    "bad_ending_at_sweep": {
+        "what": "First sweep index where the recording started to degrade "
+                "(Vrest depolarised, Rs exploded, or AP overshoot collapsed). "
+                "Everything ≥ this index is excluded from the metric scalars.",
+        "healthy": "NaN — recording ended cleanly.",
+    },
+    "n_sweeps_trimmed": {
+        "what": "How many tail sweeps were excluded from metric scalars due to bad-ending detection.",
+        "healthy": "0.",
+    },
+    "bad_ending_reason": {
+        "what": "Why the recording was trimmed: vrest_depolarisation / rs_explosion / ap_collapse.",
+        "healthy": "None (recording ended cleanly).",
+    },
 }
 
 # Synthetic non-metric triggers that surface in `triggered_metrics` lists but

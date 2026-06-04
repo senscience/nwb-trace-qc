@@ -592,6 +592,63 @@ def tune_cmd(config_path: Path, no_rerun: bool, only_failing: bool):
     tune_thresholds_interactive(config_path, rerun=not no_rerun, only_failing=only_failing)
 
 
+@main.command("inventory-metrics")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--n-samples", default=5, show_default=True, type=int,
+              help="How many NWBs to sample (one per source).")
+@click.option("--output", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Where to write the markdown inventory. Default: <output_dir>/metric_inventory.md")
+def inventory_metrics_cmd(config_path: Path, n_samples: int, output_path: Path | None):
+    """Inventory what (if any) canonical QC metrics each NWB pre-computes.
+
+    Walks N NWBs from the configured sources, inspects their processing /
+    lab_meta_data / scratch / intervals containers, and reports both per-NWB
+    findings and an aggregate metric-provenance table (per metric: pre-computed
+    in the NWB vs. computed by `nwb-trace-qc`). Useful when onboarding a new
+    cohort to understand what's already in the file.
+    """
+    from .inventory import inventory_nwb, render_inventory_console, render_inventory_markdown
+    from .manifest import build_manifest, unique_nwbs
+
+    cfg = load_config(config_path)
+    manifest = build_manifest(cfg)
+    if manifest.empty:
+        raise click.ClickException("no NWBs discovered for this project")
+    uniq = unique_nwbs(manifest)
+    # Sample one per source first, then fill up to n_samples
+    sampled: list[Path] = []
+    seen = set()
+    for ds in cfg.nwb_sources:
+        sub = uniq[uniq["dataset"] == ds.dataset]
+        if not sub.empty:
+            p = Path(sub.iloc[0]["nwb_path"])
+            sampled.append(p); seen.add(str(p))
+    for _, row in uniq.iterrows():
+        if len(sampled) >= n_samples:
+            break
+        p = Path(row["nwb_path"])
+        if str(p) in seen:
+            continue
+        sampled.append(p); seen.add(str(p))
+    sampled = sampled[:n_samples]
+
+    click.secho(f"Inventorying {len(sampled)} NWB(s)…", fg="cyan", bold=True)
+    entries = []
+    for p in sampled:
+        click.echo(f"  - {p.name}")
+        entries.append(inventory_nwb(p))
+
+    click.echo("")
+    click.echo(render_inventory_console(entries))
+
+    if output_path is None:
+        output_path = cfg.output_dir / "metric_inventory.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(render_inventory_markdown(entries, cfg.project_name))
+    click.echo("")
+    click.secho(f"Wrote {output_path}", fg="green", bold=True)
+
+
 @main.command("thresholds")
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Show how the current thresholds would classify cached cells.")

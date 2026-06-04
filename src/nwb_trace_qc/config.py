@@ -116,6 +116,9 @@ class ProjectConfig(BaseModel):
     # Interactive viewer settings
     viewer_url: str = "http://127.0.0.1:8765"
     viewer_cache_thumbnails: bool = True
+    # Quality-of-recording controls (v0.4.0)
+    trim_bad_ending: bool = True       # auto-detect + trim degraded tail sweeps
+    use_efel: bool = True              # source AP/Vrest features from eFEL when available
     # absolute base path used to resolve all other relative paths (set by loader)
     config_path: Path | None = None
 

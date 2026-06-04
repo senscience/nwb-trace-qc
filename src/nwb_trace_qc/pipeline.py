@@ -42,9 +42,10 @@ ProgressCallback = Callable[[str, int, int], None]
 
 
 def _compute_one(args):
-    nwb_path, nwb_sha256, families = args
+    nwb_path, nwb_sha256, families, use_efel, trim_bad_ending = args
     fm = StimulusFamilyMap(families)
-    metrics = compute_metrics(nwb_path, fm)
+    metrics = compute_metrics(nwb_path, fm,
+                                use_efel=use_efel, trim_bad_ending=trim_bad_ending)
     metrics.update({
         "nwb_sha256": nwb_sha256,
         "nwb_path": str(nwb_path),
@@ -333,7 +334,8 @@ def run(
     t0 = _stage_start("metric_compute", total=int(todo.shape[0]))
     n_rs_fallback_cells = 0   # NWBs whose Rs computation fell back to the 50 pA hack
     if not report_only and not todo.empty:
-        args_list = [(Path(row.nwb_path), row.nwb_sha256, cfg.stimulus_protocols)
+        args_list = [(Path(row.nwb_path), row.nwb_sha256, cfg.stimulus_protocols,
+                       cfg.use_efel, cfg.trim_bad_ending)
                      for row in todo.itertuples(index=False)]
         batch: list[dict] = []
         total = len(args_list)

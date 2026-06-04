@@ -55,7 +55,8 @@ def _evaluate_card_metric(metric: str, value, thresholds) -> str:
 
 
 def _render_health_card(row, thresholds) -> str:
-    """A 2×3 mini-heatmap of canonical whole-cell QC signals at a glance."""
+    """A 2×3 mini-heatmap of canonical whole-cell QC signals at a glance, plus
+    an optional yellow strip when the recording was trimmed due to a bad ending."""
     cells = []
     for metric, label in HEALTH_CARD_METRICS:
         if metric not in row.index:
@@ -72,7 +73,41 @@ def _render_health_card(row, thresholds) -> str:
             f"<div class='hc-vd'>{verdict.upper()}</div>"
             f"</div>"
         )
-    return f"<div class='health-card'>{''.join(cells)}</div>"
+    health = f"<div class='health-card'>{''.join(cells)}</div>"
+
+    # Recording-trim strip (v0.4.0): when bad-ending detection fired, surface
+    # the cutoff sweep + reason above the health card so the triager knows the
+    # metric scalars exclude the degraded tail.
+    n_trimmed = row.get("n_sweeps_trimmed")
+    cutoff = row.get("bad_ending_at_sweep")
+    reason = row.get("bad_ending_reason")
+    if n_trimmed is not None and not _is_nan_scalar(n_trimmed) and int(n_trimmed) > 0:
+        n_total = row.get("n_sweeps_total")
+        cutoff_str = ""
+        if cutoff is not None and not _is_nan_scalar(cutoff):
+            cutoff_str = f" at sweep {int(cutoff)}"
+            if n_total is not None and not _is_nan_scalar(n_total):
+                cutoff_str += f"/{int(n_total)}"
+        reason_str = f" ({html.escape(str(reason))})" if reason and str(reason) != "nan" else ""
+        strip = (
+            f"<div class='trim-strip'>"
+            f"<b>Recording trimmed{cutoff_str}{reason_str}.</b> "
+            f"{int(n_trimmed)} tail sweep(s) excluded from the metric scalars. "
+            f"The metrics shown reflect the pre-degradation period only."
+            f"</div>"
+        )
+        return strip + health
+    return health
+
+
+def _is_nan_scalar(v) -> bool:
+    """Tiny helper to skip the NaN check guards (pd.isna chokes on some types)."""
+    if v is None:
+        return True
+    try:
+        return bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
 
 
 def _parse_provenance(raw) -> dict | None:
@@ -433,6 +468,8 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .hc-fail {{ background: {VERDICT_COLORS['fail']}; border-color: {VERDICT_TEXT['fail']}; }}
   .hc-fail .hc-vd {{ color: {VERDICT_TEXT['fail']}; }}
   .hc-na .hc-vd {{ color: #888; }}
+  /* Recording-trim warning */
+  .trim-strip {{ background: #fff3cd; color: {VERDICT_TEXT['flag']}; padding: 0.4rem 0.75rem; border-left: 3px solid #e0b54a; margin: 0.5rem; font-size: 0.85rem; }}
   /* Failure recipe sidebar */
   .failure-recipe {{ background: #fff; border: 1px solid #e1e4e8; border-radius: 4px; padding: 0.5rem 0.75rem; margin: 0.5rem 0; font-size: 0.85rem; }}
   .failure-recipe h3 {{ margin: 0 0 0.4rem 0; font-size: 0.9rem; color: #444; }}

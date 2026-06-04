@@ -6,6 +6,14 @@ The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the i
 
 ---
 
+## What changed in v0.4.0
+
+`PIPELINE_VERSION` bumped to `0.4.0` — the v0.3.x metric cache is invalidated automatically (first run will recompute). Three substantive additions:
+
+- **Bad-ending detection + auto-trim.** When a recording degrades near the end (cell dying, seal collapsing) the pipeline now finds the cutoff sweep and excludes the post-degradation period from the metric scalars. New metrics: `bad_ending_at_sweep`, `n_sweeps_trimmed`, `bad_ending_reason` (`vrest_depolarisation` / `rs_explosion` / `ap_collapse`). The default threshold flags any cell with `n_sweeps_trimmed > 0`. Disable with `trim_bad_ending: false` in the project YAML.
+- **eFEL-sourced AP / Vrest features.** Canonical features (`voltage_base`, `AP_amplitude_from_voltagebase`, `AP_begin_voltage`, …) now come from the BBP/LNMC-standard eFEL library where it has a direct equivalent. Our custom helpers stay as fallbacks for malformed sweeps. Disable with `use_efel: false`.
+- **Metric provenance.** New `nwb-qc inventory-metrics --config <yaml>` subcommand walks a few NWBs and reports whether any pre-computed analysis modules exist that already carry canonical metric values. Also a permanent `docs/metrics_reference.md` listing what every metric is and where its value comes from.
+
 ## What changed in v0.3.0
 
 If you're upgrading from v0.2.x: the pipeline now reads paired `CurrentClampStimulusSeries` from each NWB so Rs comes from the actual injected current (not the 50 pA assumption); Rin from IV protocol; holding current per sweep; and session-level degradation deltas (first half vs second half of the recording, median-based). Plus three sketch-aligned defect metrics: `test_pulse_edge_overshoot_mv`, `ap_amp_overshoot_min_mv`, `ap_amp_attenuation_frac`. `PIPELINE_VERSION` bumped to `0.3.0`, which invalidates the v0.2.x metric cache automatically — your first run on this version will recompute every NWB. The new `nwb-qc calibrate` subcommand suggests project-specific thresholds from cohort statistics.
@@ -357,6 +365,16 @@ sample_42,pass,manually inspected — overshoot loss is end-of-recording artefac
 
 Overrides survive re-runs and threshold edits. They're applied last, so a human verdict trumps everything else.
 
+### 6g — Inventory pre-computed metrics in your NWBs (`nwb-qc inventory-metrics`)
+
+```bash
+nwb-qc inventory-metrics --config configs/mydata_project.yaml [--n-samples 5]
+```
+
+Walks a sample of NWBs from the configured sources and inspects their `processing` / `lab_meta_data` / `scratch` / `intervals` containers. For every canonical QC metric, the output reports whether any sampled file already carries a pre-computed value (`source=nwb_processing/<module>/<name>`) or whether `nwb-trace-qc` computes it (`source=nwb-trace-qc (computed)`).
+
+Writes a markdown report to `<output_dir>/metric_inventory.md`. Useful when onboarding a new cohort — for raw NWBs (Maria's / JY's case) every metric is computed; for cohorts that ran their own analysis pre-export, you'll see which features are already there. See also `docs/metrics_reference.md` for the full per-metric algorithm reference.
+
 ### 6f — Tune thresholds interactively (`nwb-qc tune`)
 
 ```bash
@@ -472,6 +490,7 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 | `nwb-qc thresholds --config <file> --dry-run` | Show how the current thresholds would classify cached cells (counts only). |
 | `nwb-qc calibrate --config <file>` | Suggest cohort-specific thresholds from cached metric distributions. Writes a `*_thresholds_suggested.yaml` you can opt into + a `cohort_stats.json` consumed by the next `run` to add percentile context to triggered chips. |
 | `nwb-qc tune --config <file> [--no-rerun] [--only-failing]` | Interactive threshold-tuning walk. Top-of-walk options: `[w]` per-rule, `[a]` accept-all-suggested, `[c]` cancel. After the walk previews new verdict counts and (optionally) re-runs the pipeline — cache-fast since metrics don't recompute. |
+| `nwb-qc inventory-metrics --config <file> [--n-samples N]` | Walk N (default 5) NWBs and report which canonical QC metrics they pre-compute internally vs. which `nwb-trace-qc` will compute. Writes `<output_dir>/metric_inventory.md`. See also `docs/metrics_reference.md` for the per-metric algorithm reference. |
 | `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer — restricted to `flag` cells only; pass/fail rows stay in `qc_report.csv`. |
 | `nwb-qc -v <subcmd>` | DEBUG-level logging on stderr. |
 | `nwb-qc --version` | Print the package version. |

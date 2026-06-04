@@ -49,6 +49,10 @@ n_sweeps_clipped:
 n_sweeps_nan:
   fail_above: 0
 
+# Bad-ending detection — any trim is a flag for the triager
+n_sweeps_trimmed:
+  flag_above: 0
+
 qc_protocol_coverage:
   fail_if_false: true
 
