@@ -37,7 +37,7 @@ def test_targeted_pick_when_family_matches(tmp_path: Path):
     out = tmp_path / "thumb.png"
     result, status = _make_thumbnail(
         nwb, out, families=default_families(),
-        reasons=["ap_amp_overshoot_mv"],   # → wanted = {ap_waveform}
+        triggered_metrics=[{"metric": "ap_amp_overshoot_mv"}],   # → wanted = {ap_waveform}
     )
     assert result is not None and out.exists()
     assert status == "rendered"
@@ -55,7 +55,7 @@ def test_fallback_when_no_family_match(tmp_path: Path, caplog: pytest.LogCapture
     with caplog.at_level("WARNING"):
         result, status = _make_thumbnail(
             nwb, out, families=default_families(),
-            reasons=["vrest_mv", "rs_drift_pct"],  # → wanted = {spontaneous_hold, test_pulse}
+            triggered_metrics=[{"metric": "vrest_mv"}, {"metric": "rs_drift_pct"}],  # → wanted = {spontaneous_hold, test_pulse}
         )
     assert result is not None and out.exists()
     assert status == "rendered"
@@ -75,7 +75,7 @@ def test_no_voltage_returns_status(tmp_path: Path):
         io.write(nwbfile)
     out = tmp_path / "thumb.png"
     result, status = _make_thumbnail(
-        nwb, out, families=default_families(), reasons=["vrest_mv"],
+        nwb, out, families=default_families(), triggered_metrics=[{"metric": "vrest_mv"}],
     )
     assert result is None
     assert status == "no_voltage_sweeps"
@@ -87,7 +87,7 @@ def test_render_error_returns_status(tmp_path: Path):
     out = tmp_path / "thumb.png"
     result, status = _make_thumbnail(
         Path("/nonexistent/path.nwb"), out,
-        families=default_families(), reasons=["vrest_mv"],
+        families=default_families(), triggered_metrics=[{"metric": "vrest_mv"}],
     )
     assert result is None
     assert status == "render_error"
@@ -117,6 +117,61 @@ def test_stratified_picks_dedups_on_tiny_lists():
     assert picks == [10, 20]
 
 
+def test_provenance_driven_pick_renders_actual_failing_sweeps(tmp_path: Path):
+    """When metric_row carries `rs_mohm_provenance` with first/last sweep names,
+    the picker should render those exact sweeps (the ones that produced the
+    failing rs_drift_pct value) — that's the most diagnostic visualization."""
+    import json
+    nwb = tmp_path / "cell.nwb"
+    # 12 Rac sweeps; the metric provenance points at the 1st and 12th
+    sweep_names = [f"ic__Rac__{i:03d}" for i in range(12)]
+    _make_nwb_with(sweep_names, nwb)
+    out = tmp_path / "thumb.png"
+
+    metric_row = {
+        "rs_mohm_provenance": json.dumps({
+            "first": "ic__Rac__000",
+            "last":  "ic__Rac__011",
+            "n": 12,
+        }),
+        # rs_drift_pct is what triggers; provenance lives under rs_mohm_provenance
+        # (matching how metrics.py emits it).
+    }
+    result, status = _make_thumbnail(
+        nwb, out, families=default_families(),
+        triggered_metrics=[{"metric": "rs_drift_pct"}],
+        metric_row=metric_row,
+    )
+    assert status == "rendered"
+    assert result is not None and out.exists()
+    # We can't easily decode the PNG to assert WHICH sweeps were rendered, but
+    # the fact that it rendered + the picker's documented priority chain
+    # (provenance > stratified > fallback) is what matters here. The unit-test
+    # below pins down the picker's actual choice.
+
+
+def test_provenance_picker_helper_returns_first_and_last_for_drift_metrics(tmp_path: Path):
+    """_provenance_sweep_names selects the actual sweep names listed in provenance
+    so the static thumbnail shows the FIRST and LAST sweeps that drove a drift
+    metric's value."""
+    import json
+    from nwb_trace_qc.pipeline import _provenance_sweep_names
+    metric_row = {
+        "rs_mohm_provenance": json.dumps({
+            "first": "ic__Rac__000", "last": "ic__Rac__011", "n": 12,
+        }),
+        "vrest_mv_provenance": json.dumps({
+            "first": "ic__SponHold30__001",
+            "last": "ic__SponHold30__012",
+            "n": 12,
+        }),
+    }
+    triggered = [{"metric": "rs_drift_pct"}, {"metric": "vrest_mv"}]
+    picks = _provenance_sweep_names(triggered, metric_row)
+    assert picks["test_pulse"] == ["ic__Rac__000", "ic__Rac__011"]
+    assert picks["spontaneous_hold"] == ["ic__SponHold30__001", "ic__SponHold30__012"]
+
+
 def test_make_thumbnail_uses_stratified_picks(tmp_path: Path):
     """An NWB with 5 APWaveform sweeps should have its 1st / 3rd-or-middle / 5th
     rendered in the static thumbnail (not 1/2/3)."""
@@ -125,7 +180,7 @@ def test_make_thumbnail_uses_stratified_picks(tmp_path: Path):
     out = tmp_path / "thumb.png"
     result, status = _make_thumbnail(
         nwb, out, families=default_families(),
-        reasons=["ap_amp_overshoot_mv"],  # → wanted = {ap_waveform}
+        triggered_metrics=[{"metric": "ap_amp_overshoot_mv"}],  # → wanted = {ap_waveform}
     )
     assert status == "rendered"
     assert result is not None

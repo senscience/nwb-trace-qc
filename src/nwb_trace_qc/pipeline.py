@@ -89,44 +89,128 @@ def _stratified_picks(candidates: list, max_n: int = 3) -> list:
     return picks
 
 
-def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[str]],
-                    reasons: list[str]) -> tuple[Path | None, str]:
+def _provenance_sweep_names(triggered: list[dict], metric_row: dict | None) -> dict[str, list[str]]:
+    """For each failing metric, look up the provenance fields in `metric_row` and
+    return the sweep names that drove the value. Maps family → ordered list of
+    sweep names to render. For drift metrics (`*_drift_pct`, `*_drift_mv`,
+    `vrest_session_drift_mv` …) this is [first_sweep, last_sweep] — the two
+    snapshots whose comparison produced the failure. For median-based metrics,
+    the provenance carries `first` and `last` of the contributing set; we use
+    those as the bookends so the user can spot drift even within a family.
+    """
+    if not metric_row:
+        return {}
+    by_family: dict[str, list[str]] = {}
+    for t in triggered:
+        metric = t.get("metric")
+        if metric not in METRIC_TO_FAMILY:
+            continue
+        family = METRIC_TO_FAMILY[metric]
+        # Most provenance lives under `<base_metric>_provenance`:
+        #   vrest_mv → vrest_mv_provenance, rs_drift_pct → rs_mohm_provenance
+        prov_key_candidates = [
+            f"{metric}_provenance",
+            "rs_mohm_provenance" if metric.startswith("rs_") else None,
+            "vrest_mv_provenance" if metric.startswith("vrest_") else None,
+            "ap_amp_overshoot_mv_provenance" if metric.startswith("ap_") else None,
+        ]
+        prov_raw = None
+        for key in prov_key_candidates:
+            if key and key in metric_row and metric_row[key] not in (None, ""):
+                prov_raw = metric_row[key]; break
+        if not prov_raw:
+            continue
+        try:
+            prov = json.loads(prov_raw) if isinstance(prov_raw, str) else dict(prov_raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        names = []
+        if prov.get("first"): names.append(prov["first"])
+        if prov.get("last") and prov.get("last") != prov.get("first"):
+            names.append(prov["last"])
+        if names:
+            by_family.setdefault(family, [])
+            for n in names:
+                if n not in by_family[family]:
+                    by_family[family].append(n)
+    return by_family
+
+
+def _make_thumbnail(nwb_path: Path, out_path: Path, *,
+                    families: dict[str, list[str]],
+                    triggered_metrics: list[dict],
+                    metric_row: dict | None = None) -> tuple[Path | None, str]:
     """Render up to 3 representative sweeps for an NWB and return (path, status).
 
     Status is one of: 'rendered', 'no_voltage_sweeps' (the NWB has zero voltage
     acquisitions — pathological), 'render_error' (matplotlib / I/O blew up).
 
-    Sweep selection: first try sweeps matching the families implicated by the
-    triggering metrics. If none match (lab-specific protocol naming, or NWBs
-    missing the expected families), fall back to "any voltage sweep" so the
-    user still gets *something* to look at — and log a warning so they know
-    their `stimulus_protocols` mapping is incomplete.
+    Sweep selection priority:
+      1. If a failing metric has provenance (e.g. rs_drift_pct knows which
+         first/last test_pulse sweeps drove the value), render *those exact
+         sweeps* — that's the most diagnostically useful picture.
+      2. Otherwise fall back to family-matched stratified picks (first/middle/last
+         from the families implicated by the failing metrics).
+      3. Last resort: any voltage sweep (with a warning logged).
+
+    Each subplot title includes the failing metric(s) tied to its family, so a
+    triager can read it as "this is what to look at for the vrest_mv FLAG".
     """
     from .nwb_io import open_nwb
     try:
+        reasons = [t.get("metric") for t in triggered_metrics if isinstance(t, dict)]
         with open_nwb(nwb_path) as f:
-            wanted_families = {METRIC_TO_FAMILY[r] for r in reasons if r in METRIC_TO_FAMILY}
+            wanted_families = {METRIC_TO_FAMILY[r] for r in reasons
+                               if r in METRIC_TO_FAMILY}
             if not wanted_families:
                 wanted_families = {"spontaneous_hold", "ap_waveform"}
+            # Group failing metric names by family so we can annotate titles
+            metrics_by_family: dict[str, list[str]] = {}
+            for t in triggered_metrics:
+                m = t.get("metric") if isinstance(t, dict) else None
+                fam = METRIC_TO_FAMILY.get(m) if m else None
+                if fam:
+                    metrics_by_family.setdefault(fam, []).append(m)
             fm = StimulusFamilyMap(families)
 
             voltage_acquisitions = []
+            name_to_obj: dict[str, tuple] = {}
             for name, obj in f.acquisition.items():
                 unit = (getattr(obj, "unit", "") or "").lower()
                 if unit not in {"volts", "v", ""}:
                     continue
                 stim = name.split("__")[1] if "__" in name and name.count("__") >= 2 else name
-                voltage_acquisitions.append((fm.family_of(stim), name, obj))
+                fam = fm.family_of(stim)
+                voltage_acquisitions.append((fam, name, obj))
+                name_to_obj[name] = (fam, name, obj)
             if not voltage_acquisitions:
                 return None, "no_voltage_sweeps"
 
-            family_matches = [(fam, name, obj) for (fam, name, obj) in voltage_acquisitions
-                              if fam in wanted_families]
-            # Stratify within the family-matched set so a cell with 30 APWaveform
-            # sweeps shows #1 / #15 / #30 instead of #1 / #2 / #3 — visible drift.
-            picks = _stratified_picks(family_matches, max_n=3)
+            # Priority 1: provenance-driven picks (the actual sweeps that drove
+            # the failing metrics). Cap at 3 total to keep the PNG readable.
+            picks: list[tuple] = []
+            picked_names: set[str] = set()
+            provenance_picks = _provenance_sweep_names(triggered_metrics, metric_row)
+            for fam, names in provenance_picks.items():
+                for name in names:
+                    if name in name_to_obj and name not in picked_names:
+                        picks.append(name_to_obj[name]); picked_names.add(name)
+                    if len(picks) >= 3:
+                        break
+                if len(picks) >= 3:
+                    break
+
+            # Priority 2: fill any remaining slots from family-matched stratified picks.
+            if len(picks) < 3:
+                family_matches = [t for t in voltage_acquisitions
+                                  if t[0] in wanted_families and t[1] not in picked_names]
+                strat = _stratified_picks(family_matches, max_n=3 - len(picks))
+                for t in strat:
+                    if t[1] not in picked_names:
+                        picks.append(t); picked_names.add(t[1])
+
+            # Priority 3 (fallback): any voltage sweep.
             if not picks:
-                # Last-resort fallback: render the first 3 voltage sweeps regardless of family.
                 log.warning(
                     "thumbnail: %s — no sweeps matched %s (families found: %s); "
                     "falling back to first 3 voltage sweeps. Map your lab's protocols "
@@ -145,7 +229,14 @@ def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[
                 t = np.arange(len(data)) / rate if rate > 0 else np.arange(len(data))
                 ax.plot(t, data * 1000.0, lw=0.6, color="#222")
                 fam_label = fam or "unmapped"
-                ax.set_title(f"{fam_label}: {name[:50]}", fontsize=8)
+                # Annotate with failing metrics tied to this family so the user
+                # can read "spontaneous_hold · vrest_mv: ic__SponHold30__001" and
+                # know exactly which failed metric this sweep is illustrating.
+                metric_tag = ""
+                if fam in metrics_by_family:
+                    ms = metrics_by_family[fam]
+                    metric_tag = f" · {', '.join(ms[:2])}{'…' if len(ms) > 2 else ''}"
+                ax.set_title(f"{fam_label}{metric_tag}: {name[:50]}", fontsize=8)
                 ax.set_ylabel("mV", fontsize=7)
                 ax.tick_params(labelsize=6)
             axes[-1].set_xlabel("time (s)", fontsize=7)
@@ -361,13 +452,22 @@ def run(
         if r.nwb_sha256 in seen_for_sha:
             thumbs[r.cell_id] = seen_for_sha[r.nwb_sha256]
         else:
-            reasons = [t["metric"] for t in (r.triggered_metrics or []) if isinstance(t, dict)]
+            triggered = [t for t in (r.triggered_metrics or []) if isinstance(t, dict)]
+            # Look up this cell's full metric row in the cache so the picker can
+            # use provenance fields (e.g. rs_mohm_provenance.first/last) to
+            # render the specific sweeps that drove the failed metric values.
+            metric_row = None
+            metric_match = cache_df[cache_df["nwb_sha256"] == r.nwb_sha256]
+            if not metric_match.empty:
+                metric_row = metric_match.iloc[0].to_dict()
             out = cfg.thumbnails_dir / f"{sha8}__{Path(r.nwb_path).stem}.png"
             if out.exists():
                 n_skipped += 1
             else:
                 _, status = _make_thumbnail(Path(r.nwb_path), out,
-                                             families=cfg.stimulus_protocols, reasons=reasons)
+                                             families=cfg.stimulus_protocols,
+                                             triggered_metrics=triggered,
+                                             metric_row=metric_row)
                 if status == "rendered":
                     n_generated += 1
                 elif status == "no_voltage_sweeps":
