@@ -198,9 +198,6 @@ def _interactive_map_unmapped(output_path: Path) -> bool:
     body = "\n".join(body_lines)
     cfg = _yaml.safe_load(body) or {}
     families = cfg.get("stimulus_protocols") or {}
-    # Ensure every canonical family slot exists so we can append cleanly
-    for fam in _FAMILIES_FOR_MAPPING:
-        families.setdefault(fam, [])
 
     click.secho(
         f"\n  Interactive mapping: {len(unmapped)} unmapped token(s). For each "
@@ -234,6 +231,9 @@ def _interactive_map_unmapped(output_path: Path) -> bool:
         if choice == 0:
             continue
         fam = _FAMILIES_FOR_MAPPING[choice - 1]
+        # Lazily create the family list only when we're actually populating it,
+        # so untouched families don't appear as empty arrays in the saved YAML.
+        families.setdefault(fam, [])
         if token not in families[fam]:
             families[fam].append(token)
         assigned[token] = fam
