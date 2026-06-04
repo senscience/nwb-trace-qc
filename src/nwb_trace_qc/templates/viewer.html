@@ -23,18 +23,31 @@
   #cell-header { padding: .5rem 1rem; background: #fff; border-bottom: 1px solid #eee; font-size: .9rem; }
   #cell-header .cell-id { font-weight: 600; font-size: 1rem; }
   #cell-header .triggered { color: #666; font-size: .8rem; margin-top: .25rem; }
+  #cell-header .implicated { color: #444; font-size: .8rem; margin-top: .2rem; }
+  #cell-header .fam-chip { display: inline-block; background: #fff3cd; color: #856404; padding: 1px 6px; border-radius: 2px; margin-right: .25rem; font-size: .72rem; font-weight: 600; }
   #metric-table { background: #fff; padding: .35rem 1rem; border-bottom: 1px solid #eee; font-size: .78rem; max-height: 80px; overflow-y: auto; }
   #metric-table .row { display: inline-block; margin-right: 1.25rem; }
   #metric-table .k { color: #666; }
   #metric-table .v { font-weight: 600; }
-  #content { display: grid; grid-template-columns: 220px 1fr; min-height: 0; overflow: hidden; }
-  #sweep-list { background: #fff; border-right: 1px solid #eee; overflow-y: auto; font-size: .8rem; }
-  #sweep-list .family { padding: .3rem .5rem; background: #f4f6f8; font-weight: 600; font-size: .75rem; color: #666; position: sticky; top: 0; z-index: 1; }
-  #sweep-list .sweep { padding: .25rem .5rem; cursor: pointer; border-bottom: 1px solid #f7f7f7; }
-  #sweep-list .sweep:hover { background: #f4f6f8; }
-  #sweep-list .sweep.selected { background: #e6f0ff; font-weight: 600; }
-  /* Fixed-size 2x2 plot grid: rows are content-sized (not 1fr), so panels
-     don't stretch with the viewport. Right pane scrolls if panels overflow. */
+  #content { display: grid; grid-template-columns: 280px 1fr; min-height: 0; overflow: hidden; }
+  /* Sweep grid (left): tiles with lazy-loaded thumbnails */
+  #sweep-list { background: #fff; border-right: 1px solid #eee; overflow-y: auto; font-size: .75rem; padding: 0; }
+  #sweep-list .sweep-toolbar { position: sticky; top: 0; background: #fff; padding: .4rem .5rem; border-bottom: 1px solid #eee; z-index: 2; display: flex; align-items: center; gap: .4rem; }
+  #sweep-list .sweep-toolbar button { font-size: .7rem; padding: .15rem .4rem; border: 1px solid #ccc; background: #fff; border-radius: 3px; cursor: pointer; }
+  #sweep-list .sweep-toolbar button.active { background: #e6f0ff; border-color: #5a9ad6; color: #1c4f8b; font-weight: 600; }
+  #sweep-list .family { padding: .25rem .5rem; background: #f4f6f8; font-weight: 600; font-size: .72rem; color: #666; position: sticky; top: 34px; z-index: 1; }
+  #sweep-list .family.implicated { background: #fff8db; color: #856404; }
+  #sweep-list .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; padding: .25rem; }
+  .tile { position: relative; cursor: pointer; border: 1px solid #ddd; border-radius: 3px; background: #fff; padding: 2px; min-height: 70px; transition: border-color .1s, opacity .15s; }
+  .tile.implicated { border-color: #d6a76e; box-shadow: 0 0 0 1px #fff3cd inset; }
+  .tile.dimmed { opacity: 0.45; }
+  .tile.hidden { display: none; }
+  .tile:hover { border-color: #5a9ad6; }
+  .tile.selected { border-color: #1c4f8b; box-shadow: 0 0 0 2px #e6f0ff; }
+  .tile img { display: block; width: 100%; height: 60px; object-fit: fill; background: #fafbfc; }
+  .tile .lbl { font-size: .65rem; color: #444; margin-top: 2px; padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile .badge { position: absolute; top: 1px; right: 2px; font-size: .65rem; color: #856404; }
+  /* Plot grid (right) */
   #plots {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -46,15 +59,8 @@
     align-content: start;
   }
   .panel {
-    background: #fff;
-    border: 1px solid #e0e0e0;
-    border-radius: 4px;
-    padding: .4rem;
-    position: relative;
-    height: 240px;
-    max-height: 240px;
-    box-sizing: border-box;
-    overflow: hidden;
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; padding: .4rem;
+    position: relative; height: 240px; max-height: 240px; box-sizing: border-box; overflow: hidden;
   }
   .panel.empty { border-style: dashed; color: #999; display: flex; align-items: center; justify-content: center; font-style: italic; }
   .panel.loading { color: #888; display: flex; align-items: center; justify-content: center; font-style: italic; }
@@ -67,7 +73,7 @@
 </head><body>
 <header>
   <h1>{{PROJECT}} — interactive trace viewer</h1>
-  <span class="meta">flag cells (rule-based borderline) — click a cell, then up to 4 sweeps</span>
+  <span class="meta">flag cells (rule-based borderline) — click a cell, then any sweep tile</span>
   <span class="count" id="flag-count">{{N_FLAG}} flag of {{N_TOTAL}} total</span>
 </header>
 <main>
@@ -103,7 +109,30 @@ const SKIP_KEYS = new Set([
 let CELLS = [];
 let activeCell = null;
 let sweepsCache = {};
+let METRIC_TO_FAMILY = {};
+let showImplicatedOnly = true;     // user-requested default
 const slots = [null, null, null, null];
+let thumbObserver = null;          // IntersectionObserver for lazy thumb loading
+
+async function loadFamilies() {
+  try {
+    const r = await fetch('/api/families');
+    if (!r.ok) return;
+    const body = await r.json();
+    METRIC_TO_FAMILY = body.metric_to_family || {};
+  } catch (e) { /* viewer still works without it; just no filtering */ }
+}
+
+function implicatedFamiliesFor(row) {
+  if (!row || !row.triggered_metrics) return new Set();
+  const out = new Set();
+  for (const t of row.triggered_metrics) {
+    const m = (t && t.metric) || null;
+    const fam = m && METRIC_TO_FAMILY[m];
+    if (fam) out.add(fam);
+  }
+  return out;
+}
 
 async function loadCells() {
   try {
@@ -118,6 +147,10 @@ async function loadCells() {
     return;
   }
   renderCellList();
+  // Deep link: ?cell=<id>
+  const qs = new URLSearchParams(window.location.search);
+  const wanted = qs.get('cell');
+  if (wanted) selectCell(wanted);
 }
 
 function renderCellList() {
@@ -163,19 +196,26 @@ async function selectCell(cellId) {
   activeCell = cellId;
   document.querySelectorAll('#cell-list li').forEach(li => li.classList.toggle('active', li.dataset.cellid === cellId));
   const row = CELLS.find(c => c.cell_id === cellId) || {};
-  const triggered = Array.isArray(row.triggered_metrics)
-    ? row.triggered_metrics.map(t => `${t.metric} (${t.reason||t.verdict})`).join(', ')
-    : '';
+  const implicated = implicatedFamiliesFor(row);
   const verdict = row.final_verdict || '';
+  const triggered = Array.isArray(row.triggered_metrics)
+    ? row.triggered_metrics.map(t => {
+        const fam = (t && t.metric) ? METRIC_TO_FAMILY[t.metric] : null;
+        const famTag = fam ? ` · ${fam}` : '';
+        return `${t.metric} (${t.reason||t.verdict})${famTag}`;
+      }).join(', ')
+    : '';
+  const famChips = [...implicated].sort().map(f => `<span class="fam-chip">${f}</span>`).join('');
+  const implLine = implicated.size
+    ? `<div class="implicated"><b>Inspect these families:</b> ${famChips}</div>`
+    : '';
   document.querySelector('#cell-header').innerHTML =
     `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
-    `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>`;
+    `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>` +
+    implLine;
   renderMetricTable(row);
-
-  // Show 4 loading panels immediately
   for (let i = 0; i < 4; i++) showLoading(i);
 
-  // Load sweep list (cached on the server per nwb_sha256)
   if (!sweepsCache[cellId]) {
     const r = await fetch(`/api/sweeps/${encodeURIComponent(cellId)}`);
     if (!r.ok) {
@@ -185,55 +225,125 @@ async function selectCell(cellId) {
     }
     sweepsCache[cellId] = await r.json();
   }
-  renderSweepList();
-  // Auto-pick first sweep of up to 4 distinct families
+  renderSweepGrid(implicated);
+  const sweeps = sweepsCache[cellId];
+  // Auto-pick first sweep of up to 4 distinct *implicated* families if available,
+  // else fall back to any 4 distinct families.
   const seen = new Set();
   const picks = [];
-  for (const s of sweepsCache[cellId]) {
-    if (s.family && !seen.has(s.family) && picks.length < 4) {
+  for (const s of sweeps) {
+    const inImpl = !implicated.size || implicated.has(s.family);
+    if (inImpl && s.family && !seen.has(s.family) && picks.length < 4) {
       picks.push(s); seen.add(s.family);
     }
   }
-  // Fire all four fetches in parallel
+  if (!picks.length) {
+    for (const s of sweeps) {
+      if (s.family && !seen.has(s.family) && picks.length < 4) {
+        picks.push(s); seen.add(s.family);
+      }
+    }
+  }
   const tasks = [];
   for (let i = 0; i < 4; i++) {
     if (picks[i]) tasks.push(loadSweepIntoSlot(picks[i], i));
-    else { clearSlot(i); }
+    else clearSlot(i);
   }
   await Promise.all(tasks);
 }
 
-function renderSweepList() {
+function renderSweepGrid(implicated) {
   const sw = document.getElementById('sweep-list');
   sw.innerHTML = '';
+  // Toolbar with implicated-only / all toggle
+  const toolbar = document.createElement('div');
+  toolbar.className = 'sweep-toolbar';
+  toolbar.innerHTML = `
+    <span style="font-size:.72rem;color:#666;">Show:</span>
+    <button data-mode="implicated" ${showImplicatedOnly ? 'class="active"' : ''}>implicated only</button>
+    <button data-mode="all" ${!showImplicatedOnly ? 'class="active"' : ''}>all sweeps</button>
+  `;
+  toolbar.querySelectorAll('button').forEach(btn => {
+    btn.onclick = () => {
+      showImplicatedOnly = btn.dataset.mode === 'implicated';
+      renderSweepGrid(implicated);
+    };
+  });
+  sw.appendChild(toolbar);
+
   const byFamily = {};
   for (const s of sweepsCache[activeCell] || []) {
     const f = s.family || 'other';
     (byFamily[f] = byFamily[f] || []).push(s);
   }
-  Object.keys(byFamily).sort().forEach(fam => {
+  // Family ordering: implicated first, then alpha
+  const fams = Object.keys(byFamily).sort((a, b) => {
+    const ai = implicated.has(a) ? 0 : 1, bi = implicated.has(b) ? 0 : 1;
+    return ai !== bi ? ai - bi : a.localeCompare(b);
+  });
+  let anyShown = false;
+  for (const fam of fams) {
+    const fSweeps = byFamily[fam];
+    const isImplicated = implicated.size === 0 || implicated.has(fam);
+    if (showImplicatedOnly && !isImplicated) continue;
+    anyShown = true;
     const h = document.createElement('div');
-    h.className = 'family'; h.textContent = `${fam} (${byFamily[fam].length})`;
+    h.className = 'family' + (implicated.has(fam) ? ' implicated' : '');
+    h.textContent = `${fam} (${fSweeps.length})`;
     sw.appendChild(h);
-    byFamily[fam].forEach(s => {
-      const d = document.createElement('div');
-      d.className = 'sweep'; d.dataset.idx = s.idx;
-      d.textContent = `${s.stimulus_type} ${s.sweep_number} · ${s.duration_s.toFixed(2)}s`;
-      d.onclick = () => {
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    fSweeps.forEach(s => {
+      const tile = document.createElement('div');
+      tile.className = 'tile';
+      if (implicated.has(s.family)) tile.classList.add('implicated');
+      if (implicated.size && !implicated.has(s.family)) tile.classList.add('dimmed');
+      tile.dataset.idx = s.idx;
+      tile.dataset.family = s.family || '';
+      tile.innerHTML = `
+        <img data-src="/api/thumb/${encodeURIComponent(activeCell)}/${s.idx}?w=220&h=70" alt="${s.stimulus_type} ${s.sweep_number}" loading="lazy"/>
+        <div class="lbl">${s.stimulus_type} ${s.sweep_number}<span style="color:#999"> · ${s.duration_s.toFixed(2)}s</span></div>
+        ${implicated.has(s.family) ? '<span class="badge">⚠</span>' : ''}
+      `;
+      tile.onclick = () => {
         const slot = slots.findIndex(x => x === null);
         loadSweepIntoSlot(s, slot >= 0 ? slot : 0);
       };
-      sw.appendChild(d);
+      grid.appendChild(tile);
     });
-  });
+    sw.appendChild(grid);
+  }
+  if (!anyShown) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.innerHTML = (implicated.size === 0)
+      ? `no sweeps in this NWB`
+      : `no sweeps in the implicated families<br/><br/><b>⚠ Your <code>stimulus_protocols:</code> mapping may not cover this lab's protocol names.</b><br/>See the YAML's UNMAPPED block. Or click <a href="#" onclick="event.preventDefault();showImplicatedOnly=false;renderSweepGrid(new Set());">[show all sweeps]</a>.`;
+    sw.appendChild(empty);
+  }
+  attachLazyThumbObserver();
   highlightSelectedSweeps();
 }
 
+function attachLazyThumbObserver() {
+  if (thumbObserver) thumbObserver.disconnect();
+  thumbObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const img = entry.target;
+      if (img.dataset.src && !img.src) {
+        img.src = img.dataset.src;
+      }
+      thumbObserver.unobserve(img);
+    }
+  }, { root: document.getElementById('sweep-list'), rootMargin: '120px', threshold: 0.01 });
+  document.querySelectorAll('#sweep-list .tile img').forEach(img => thumbObserver.observe(img));
+}
+
 function highlightSelectedSweeps() {
-  document.querySelectorAll('#sweep-list .sweep').forEach(el => {
+  document.querySelectorAll('#sweep-list .tile').forEach(el => {
     const idx = parseInt(el.dataset.idx, 10);
-    const sel = slots.some(s => s && s.sweep_idx === idx);
-    el.classList.toggle('selected', sel);
+    el.classList.toggle('selected', slots.some(s => s && s.sweep_idx === idx));
   });
 }
 
@@ -247,9 +357,7 @@ async function loadSweepIntoSlot(sweep, slotIdx) {
   showLoading(slotIdx);
   try {
     const r = await fetch(`/api/trace/${encodeURIComponent(activeCell)}/${sweep.idx}?max_points=${MAX_POINTS}`);
-    if (!r.ok) {
-      clearSlot(slotIdx); return;
-    }
+    if (!r.ok) { clearSlot(slotIdx); return; }
     const data = await r.json();
     slots[slotIdx] = { cell_id: activeCell, sweep_idx: sweep.idx, name: sweep.name, family: sweep.family };
     highlightSelectedSweeps();
@@ -317,7 +425,6 @@ function drawPanel(slotIdx, data, sweep) {
 document.getElementById('cell-filter').addEventListener('input', renderCellList);
 let _resizeTimer = null;
 window.addEventListener('resize', () => {
-  // Debounce + redraw active slots from cached x/y in-DOM data (re-fetch is wasteful).
   clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(() => {
     slots.forEach((s, i) => {
@@ -328,6 +435,7 @@ window.addEventListener('resize', () => {
     });
   }, 200);
 });
-loadCells();
+
+(async () => { await loadFamilies(); await loadCells(); })();
 </script>
 </body></html>

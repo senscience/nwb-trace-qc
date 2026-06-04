@@ -1,13 +1,12 @@
-"""Server endpoint smoke tests — LTTB downsampler + handler routing.
-
-The /api/sweeps and /api/trace endpoints require a real NWB; those are exercised
-end-to-end in the JY run. Here we test the pure-numpy LTTB and the handler-routing
-boundary.
-"""
+"""Server endpoint smoke tests — LTTB downsampler + handler routing + thumb cache."""
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pynwb
+import pytest
 
+from nwb_trace_qc import server as srv_mod
 from nwb_trace_qc.server import _build_flag_cells, _is_nan, _lttb
 
 
@@ -65,3 +64,78 @@ def test_is_nan_handles_python_floats_and_pandas_na():
     assert _is_nan(0.0) is False
     assert _is_nan("") is False  # empty string is a value, not NaN
     assert _is_nan(-65.3) is False
+
+
+@pytest.fixture
+def _isolated_server_state(tmp_path: Path, monkeypatch):
+    """Reset module-level server caches so tests don't bleed state."""
+    monkeypatch.setattr(srv_mod, "_THUMB_LRU", srv_mod.OrderedDict())
+    monkeypatch.setattr(srv_mod, "_HANDLE_LRU", srv_mod.OrderedDict())
+    monkeypatch.setattr(srv_mod, "_thumbnails_dir", tmp_path)
+    monkeypatch.setattr(srv_mod, "_thumb_disk_cache_enabled", True)
+    yield
+
+
+def _write_min_nwb(path: Path, n_sweeps: int = 3) -> str:
+    """Write a minimal HDF5 NWB with `n_sweeps` voltage acquisitions."""
+    nwbfile = pynwb.NWBFile(
+        session_description="t", identifier=path.stem,
+        session_start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    elec = nwbfile.create_icephys_electrode(
+        name="elec0", description="d",
+        device=nwbfile.create_device(name="a", description="d"),
+    )
+    for i in range(n_sweeps):
+        nwbfile.add_acquisition(pynwb.icephys.CurrentClampSeries(
+            name=f"ic__APWaveform__{i:03d}",
+            data=np.linspace(-0.07, 0.03, 800),
+            electrode=elec, gain=1.0, starting_time=0.0, rate=10000.0, unit="volts",
+        ))
+    with pynwb.NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwbfile)
+    return "sha-fake-" + path.stem
+
+
+def test_render_sweep_thumb_returns_png_and_caches(_isolated_server_state, tmp_path: Path):
+    """First call renders + writes disk + populates LRU; second call is a memory hit."""
+    nwb = tmp_path / "cell.nwb"
+    sha = _write_min_nwb(nwb, n_sweeps=2)
+
+    png1 = srv_mod._render_sweep_thumb(nwb, sha, 0, 220, 100)
+    assert png1.startswith(b"\x89PNG")
+    assert (sha, 0, 220, 100) in srv_mod._THUMB_LRU
+    # Disk cache too
+    disk = srv_mod._thumb_disk_path(sha, 0, 220, 100)
+    assert disk is not None and disk.is_file()
+
+    # Second call: same bytes (cache hit)
+    png2 = srv_mod._render_sweep_thumb(nwb, sha, 0, 220, 100)
+    assert png1 == png2
+
+
+def test_render_sweep_thumb_bad_index_raises(_isolated_server_state, tmp_path: Path):
+    nwb = tmp_path / "cell.nwb"
+    sha = _write_min_nwb(nwb, n_sweeps=2)
+    with pytest.raises(IndexError):
+        srv_mod._render_sweep_thumb(nwb, sha, 99, 220, 100)
+
+
+def test_render_sweep_thumb_loads_from_disk_on_lru_miss(_isolated_server_state,
+                                                          tmp_path: Path, monkeypatch):
+    """If the LRU is cleared but the disk file exists, the second call uses disk
+    (which is faster than re-opening the NWB)."""
+    nwb = tmp_path / "cell.nwb"
+    sha = _write_min_nwb(nwb, n_sweeps=2)
+    png1 = srv_mod._render_sweep_thumb(nwb, sha, 0, 220, 100)
+    srv_mod._THUMB_LRU.clear()  # simulate eviction
+    # Spy on _get_handle to confirm we did NOT touch the NWB the second time
+    called = {"n": 0}
+    real_get_handle = srv_mod._get_handle
+    def spy(p):
+        called["n"] += 1
+        return real_get_handle(p)
+    monkeypatch.setattr(srv_mod, "_get_handle", spy)
+    png2 = srv_mod._render_sweep_thumb(nwb, sha, 0, 220, 100)
+    assert png2 == png1
+    assert called["n"] == 0  # served from disk, never opened the NWB

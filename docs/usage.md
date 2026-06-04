@@ -260,7 +260,11 @@ open /path/to/qc_output_mydata/qc_report.html
 - Table: one row per cell with verdict badge, triggered metrics as colored chips, and key metric values.
 - Click any row to expand → full metric table, inline trace thumbnails of the offending sweeps, a copyable override template, and (when present) vision-judge / human-override banners.
 
-The HTML has zero external resources. You can copy it to a colleague's laptop and everything still renders.
+Each triggered-metric chip now carries the implicated stimulus **family** as a small italic tag, e.g. `vrest_mv nan · spontaneous_hold`. And every expanded cell shows an **"Inspect these families:"** strip above the thumbnails listing the unique families implicated by that cell's triggers, plus an **"Inspect all sweeps in viewer →"** deep link to Step 5's interactive viewer (clicking it pre-selects the cell — requires `nwb-qc serve` to be running). The strip surfaces *which* sweep types are worth looking at instead of asking you to memorize the metric→family mapping.
+
+The static thumbnail PNG itself still stacks at most 3 representative sweeps. Within a matched family, picks are **stratified** (first / middle / last) rather than just the first 3, so a cell with 30 APWaveform sweeps shows sweeps #1, #15, #30 — easier to spot within-family drift at a glance.
+
+The HTML has zero external resources. You can copy it to a colleague's laptop and everything still renders (the deep link only works when the viewer is reachable on `localhost`).
 
 **Check before moving on:** the cells that show up in fail/flag actually look bad in their thumbnails. If many cells fail on a single metric that *shouldn't* be cohort-wide (e.g. `qc_protocol_coverage`), that points to a stimulus-name or threshold mismatch — handle in Step 6.
 
@@ -278,17 +282,23 @@ This starts a localhost-only HTTP server (default port 8765) and opens your brow
 
 **Layout:**
 
-- **Left** — cell list with verdict chips, filterable by `cell_id`, sorted fail/flag first.
-- **Centre-left** — sweeps for the selected cell, grouped by stimulus family.
-- **Right** — 2 × 2 grid of plot panels. Click a sweep to drop it into the next free slot; click "×" on a panel to clear it.
+- **Left** — `flag` cell list (pass/fail rows aren't surfaced here — the canonical record is `qc_report.csv`), filterable by `cell_id`.
+- **Centre-left** — **sweep grid**: every voltage acquisition in the selected cell's NWB rendered as a small lazy-loaded thumbnail (~220×70 px), grouped by stimulus family. Implicated-family sweeps get a ⚠ badge and a yellow border; non-implicated sweeps are dimmed. A toggle above the grid switches between **"implicated only"** (default — matches what the triggered metrics actually point to) and **"all sweeps"** (the full ~100–200 sweeps per NWB).
+- **Right** — 2 × 2 grid of plot panels. Click a sweep tile to drop the full-resolution trace into the next free slot; click "×" on a panel to clear it.
 
-Plots render with vanilla Canvas (no JS libraries), include a dashed 0 mV reference line, and decimate via LTTB to ~2,500 points regardless of source sampling rate. Stop the server with `Ctrl-C`.
+Thumbnails are rendered **on demand server-side** when a tile scrolls into view (IntersectionObserver). The pipeline doesn't pre-generate them — first hit per `(cell, sweep)` opens the NWB, decimates via LTTB, and caches the PNG both in memory (LRU of 256) and on disk under `qc_output_*/traces/viewer/`. The second visit to the same cell is instant. Full-resolution Canvas plots use the existing `/api/trace` endpoint and the LRU-cached NWB handles, so the four default panel fetches after a cell click open the NWB once.
+
+**Deep-linking:** the static report's per-cell "Inspect all sweeps →" link uses `?cell=<cell_id>` — the viewer auto-selects that cell on load. Use this to keep the cohort triage flow tight: static report for the at-a-glance verdict + the 3-stacked thumbnail, viewer for any-sweep depth.
+
+**Unmapped-protocols warning:** if a selected cell's implicated families have *zero* matching sweeps in the NWB (typically: your `stimulus_protocols:` mapping doesn't cover this lab's protocol names), the sweep grid shows a yellow callout pointing at the YAML's `# ⚠ UNMAPPED tokens` block and a "show all sweeps" shortcut. Fix the mapping (Step 1), rerun, and the warning disappears.
 
 You can also hit the API directly for scripting:
 
 ```bash
 curl http://127.0.0.1:8765/api/sweeps/<cell_id>
 curl 'http://127.0.0.1:8765/api/trace/<cell_id>/<sweep_idx>?max_points=1000'
+curl -o sweep_005.png 'http://127.0.0.1:8765/api/thumb/<cell_id>/5?w=220&h=100'
+curl http://127.0.0.1:8765/api/families
 ```
 
 **Flags:** `--port N` to change the port, `--no-browser` to skip auto-opening.

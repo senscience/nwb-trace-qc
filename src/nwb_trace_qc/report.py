@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .families import METRIC_TO_FAMILY, PSEUDO_METRIC_LABELS, implicated_families
+
 
 VERDICT_COLORS = {
     "pass": "#d4edda",
@@ -39,13 +41,16 @@ def _format_value(v) -> str:
 
 def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 project_name: str, pipeline_version: str, thresholds_fp: str = "",
-                metric_columns: list[str] | None = None) -> str:
+                metric_columns: list[str] | None = None,
+                viewer_url: str = "http://127.0.0.1:8765") -> str:
     """Render the full self-contained HTML report.
 
     `report_df` must have columns: cell_id, dataset, computed_verdict, final_verdict,
     triggered_metrics (JSON list-of-dicts as string or list), <metric columns>...,
     optional override_note/override_reviewer/override_date.
     `thumbnails` is a dict {cell_id: [paths-to-PNGs]}.
+    `viewer_url` is the base URL where `nwb-qc serve` is reachable — used for the
+    per-cell "Inspect all sweeps →" deep link.
     """
     metric_columns = metric_columns or [
         "vrest_mv", "rs_mohm_final", "rs_drift_pct", "ap_amp_overshoot_mv",
@@ -66,15 +71,24 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
         .reindex(columns=["pass", "flag", "fail"], fill_value=0)
     )
 
-    def _trigger_chips(raw):
+    def _parse_triggers(raw):
         if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-            return ""
-        items = raw if isinstance(raw, list) else json.loads(raw) if raw else []
+            return []
+        return raw if isinstance(raw, list) else (json.loads(raw) if raw else [])
+
+    def _trigger_chips(items):
+        """Render colored chips for each triggered metric, tagged with its implicated
+        stimulus family so triagers know which sweeps to inspect.
+        """
         chips = []
         for it in items:
             cls = it.get("verdict", "pass")
-            label = f"{it.get('metric', '?')} {it.get('reason', '') or ''}".strip()
-            chips.append(f"<span class='chip chip-{cls}'>{html.escape(label)}</span>")
+            metric = it.get("metric", "?")
+            label = f"{metric} {it.get('reason', '') or ''}".strip()
+            fam = METRIC_TO_FAMILY.get(metric) or PSEUDO_METRIC_LABELS.get(metric)
+            fam_tag = (f"<span class='fam-tag'>· {html.escape(fam)}</span>"
+                       if fam else "")
+            chips.append(f"<span class='chip chip-{cls}'>{html.escape(label)}{fam_tag}</span>")
         return "".join(chips)
 
     rows_html = []
@@ -84,7 +98,8 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
         dataset = str(row.get("dataset", ""))
         verdict = str(row.get("final_verdict", "pass"))
         computed = str(row.get("computed_verdict", verdict))
-        triggered = _trigger_chips(row.get("triggered_metrics"))
+        triggers_list = _parse_triggers(row.get("triggered_metrics"))
+        triggered = _trigger_chips(triggers_list)
         override_note = str(row.get("override_note", "") or "")
         # Build metric cells
         metric_cells = "".join(
@@ -103,6 +118,25 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
             f"<img src='data:image/png;base64,{_png_b64(t)}' alt='{html.escape(t.name)}' />"
             for t in thumbs
         )
+        # "Inspect these families" hint — derived from triggered metrics, so
+        # the triager knows which sweep types to look at instead of scrolling
+        # through every voltage acquisition in the NWB.
+        impl = sorted(implicated_families(triggers_list))
+        if impl:
+            impl_chips = "".join(f"<span class='fam-chip'>{html.escape(f)}</span>" for f in impl)
+            implicated_block = (
+                f"<div class='implicated-line'><b>Inspect these families:</b> {impl_chips}"
+                f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
+                f"target='_blank' rel='noopener' "
+                f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
+            )
+        else:
+            implicated_block = (
+                f"<div class='implicated-line'>"
+                f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
+                f"target='_blank' rel='noopener' "
+                f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
+            )
         override_block = ""
         if override_note or row.get("override_reviewer") or computed != verdict:
             override_block = (
@@ -139,6 +173,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   <td colspan='{5 + len(metric_columns)}'>
     {override_block}
     {vision_block}
+    {implicated_block}
     <div class='detail-grid'>
       <div class='detail-metrics'><table class='kv'>{full_metrics}</table></div>
       <div class='detail-thumbs'>{thumb_html}</div>
@@ -189,6 +224,11 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .chip-flag {{ background: {VERDICT_COLORS['flag']}; color: {VERDICT_TEXT['flag']}; }}
   .chip-fail {{ background: {VERDICT_COLORS['fail']}; color: {VERDICT_TEXT['fail']}; }}
   .chip-pass {{ background: {VERDICT_COLORS['pass']}; color: {VERDICT_TEXT['pass']}; }}
+  .chip .fam-tag {{ margin-left: 0.3rem; opacity: 0.75; font-style: italic; font-size: 0.68rem; }}
+  .implicated-line {{ background: #fff8db; padding: 0.4rem 0.75rem; border-left: 3px solid #e0b54a; margin: 0.5rem; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }}
+  .implicated-line .fam-chip {{ display: inline-block; background: #fff3cd; color: {VERDICT_TEXT['flag']}; padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }}
+  .implicated-line .viewer-link {{ margin-left: auto; color: #1c4f8b; text-decoration: none; font-weight: 600; font-size: 0.82rem; }}
+  .implicated-line .viewer-link:hover {{ text-decoration: underline; }}
   .expander {{ cursor: pointer; width: 1.2rem; }}
   .detail {{ display: none; background: #fcfcfd; }}
   .detail.open {{ display: table-row; }}
@@ -307,7 +347,8 @@ document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('cl
 
 def write_report(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                  html_path: Path, csv_path: Path, project_name: str,
-                 pipeline_version: str, thresholds_fp: str = "") -> None:
+                 pipeline_version: str, thresholds_fp: str = "",
+                 viewer_url: str = "http://127.0.0.1:8765") -> None:
     html_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     html_str = render_html(
@@ -315,6 +356,7 @@ def write_report(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
         project_name=project_name,
         pipeline_version=pipeline_version,
         thresholds_fp=thresholds_fp,
+        viewer_url=viewer_url,
     )
     html_path.write_text(html_str, encoding="utf-8")
     # CSV: flatten triggered_metrics to a string

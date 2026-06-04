@@ -27,6 +27,7 @@ import pandas as pd
 from . import PIPELINE_VERSION, __version__
 from .cache import append_rows, cached_hashes, filter_for_version, load_cache
 from .config import ProjectConfig, default_families
+from .families import METRIC_TO_FAMILY
 from .manifest import build_manifest, load_acquisition_index, save_manifest, unique_nwbs
 from .metrics import compute_metrics
 from .overrides import apply_overrides, init_overrides_file, load_overrides
@@ -68,21 +69,24 @@ def _peak_rss_mb() -> float:
     return raw / 1024
 
 
-_REASON_TO_FAMILY = {
-    "vrest_mv":            "spontaneous_hold",
-    "vrest_drift_mv":      "spontaneous_hold",
-    "baseline_rms_mv":     "spontaneous_hold",
-    "rs_mohm_initial":     "test_pulse",
-    "rs_mohm_final":       "test_pulse",
-    "rs_drift_pct":        "test_pulse",
-    "rac_decay_residual_rel": "test_pulse",
-    "ap_amp_overshoot_mv": "ap_waveform",
-    "ap_threshold_drift_mv": "ap_waveform",
-    "ap_amp_cv":           "ap_waveform",
-    "ap_failure_fraction": "ap_waveform",
-    "vm_drift_within_sweep_mv_per_s": "rest_firing",
-    "late_instability_index": "rest_firing",
-}
+def _stratified_picks(candidates: list, max_n: int = 3) -> list:
+    """From an ordered list of candidates, pick at most max_n samples that are
+    spread across the list (first / middle / last for max_n=3) rather than just
+    the head. Surfaces within-family drift in the static report.
+    """
+    if len(candidates) <= max_n:
+        return list(candidates)
+    if max_n <= 1:
+        return [candidates[0]]
+    # Even-spaced indices including endpoints
+    last = len(candidates) - 1
+    idxs = [round(i * last / (max_n - 1)) for i in range(max_n)]
+    # Dedup while preserving order (defensive: rounding can collide on tiny lists)
+    seen, picks = set(), []
+    for i in idxs:
+        if i not in seen:
+            seen.add(i); picks.append(candidates[i])
+    return picks
 
 
 def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[str]],
@@ -101,7 +105,7 @@ def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[
     from .nwb_io import open_nwb
     try:
         with open_nwb(nwb_path) as f:
-            wanted_families = {_REASON_TO_FAMILY[r] for r in reasons if r in _REASON_TO_FAMILY}
+            wanted_families = {METRIC_TO_FAMILY[r] for r in reasons if r in METRIC_TO_FAMILY}
             if not wanted_families:
                 wanted_families = {"spontaneous_hold", "ap_waveform"}
             fm = StimulusFamilyMap(families)
@@ -116,8 +120,11 @@ def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[
             if not voltage_acquisitions:
                 return None, "no_voltage_sweeps"
 
-            picks = [(fam, name, obj) for (fam, name, obj) in voltage_acquisitions
-                     if fam in wanted_families][:3]
+            family_matches = [(fam, name, obj) for (fam, name, obj) in voltage_acquisitions
+                              if fam in wanted_families]
+            # Stratify within the family-matched set so a cell with 30 APWaveform
+            # sweeps shows #1 / #15 / #30 instead of #1 / #2 / #3 — visible drift.
+            picks = _stratified_picks(family_matches, max_n=3)
             if not picks:
                 # Last-resort fallback: render the first 3 voltage sweeps regardless of family.
                 log.warning(
@@ -127,7 +134,7 @@ def _make_thumbnail(nwb_path: Path, out_path: Path, *, families: dict[str, list[
                     nwb_path.name, sorted(wanted_families),
                     sorted({f or "?unmapped?" for f, _, _ in voltage_acquisitions}),
                 )
-                picks = voltage_acquisitions[:3]
+                picks = _stratified_picks(voltage_acquisitions, max_n=3)
 
             fig, axes = plt.subplots(len(picks), 1, figsize=(6, 1.8 * len(picks)), sharex=False)
             if len(picks) == 1:
@@ -403,7 +410,8 @@ def run(
                  csv_path=cfg.report_csv,
                  project_name=cfg.project_name,
                  pipeline_version=PIPELINE_VERSION,
-                 thresholds_fp=str(cfg.thresholds_file))
+                 thresholds_fp=str(cfg.thresholds_file),
+                 viewer_url=cfg.viewer_url)
     viewer_src = Path(__file__).parent / "templates" / "viewer.html"
     if viewer_src.exists():
         viewer_dst = cfg.report_html.parent / "qc_viewer.html"

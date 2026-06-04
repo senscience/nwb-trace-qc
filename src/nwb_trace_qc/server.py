@@ -29,11 +29,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import io as _io
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
 from .config import ProjectConfig
+from .families import METRIC_TO_FAMILY, PSEUDO_METRIC_LABELS
 from .nwb_io import is_zarr, nwb_sha256, open_nwb
 from .stimuli import StimulusFamilyMap
 
@@ -48,6 +55,8 @@ _project_name: str = ""
 _family_map: StimulusFamilyMap | None = None
 _total_cells: int = 0
 _flag_cells: list[dict[str, Any]] = []
+_thumbnails_dir: Path | None = None
+_thumb_disk_cache_enabled: bool = True
 
 
 def _lttb(x: np.ndarray, y: np.ndarray, n_out: int) -> tuple[np.ndarray, np.ndarray]:
@@ -154,6 +163,66 @@ def _read_sweeps(nwb_path: Path, sha: str | None = None) -> list[dict[str, Any]]
     return out
 
 
+_THUMB_LRU: "OrderedDict[tuple, bytes]" = OrderedDict()
+_THUMB_LRU_LOCK = threading.Lock()
+_THUMB_LRU_MAX = 256  # ~5 MB at ~20 KB/PNG
+
+
+def _thumb_disk_path(sha: str, sweep_idx: int, w: int, h: int) -> Path | None:
+    if not (_thumb_disk_cache_enabled and _thumbnails_dir):
+        return None
+    return _thumbnails_dir / "viewer" / f"{sha[:8]}__{sweep_idx}_{w}x{h}.png"
+
+
+def _render_sweep_thumb(nwb_path: Path, sha: str, sweep_idx: int,
+                        w: int, h: int) -> bytes:
+    """Render a single decimated sweep to a small PNG. Two-layer cache: in-memory
+    LRU + optional on-disk PNG. Returns the raw PNG bytes."""
+    key = (sha, sweep_idx, w, h)
+    with _THUMB_LRU_LOCK:
+        if key in _THUMB_LRU:
+            _THUMB_LRU.move_to_end(key)
+            return _THUMB_LRU[key]
+    disk_path = _thumb_disk_path(sha, sweep_idx, w, h)
+    if disk_path and disk_path.is_file():
+        data = disk_path.read_bytes()
+        with _THUMB_LRU_LOCK:
+            _THUMB_LRU[key] = data
+            while len(_THUMB_LRU) > _THUMB_LRU_MAX:
+                _THUMB_LRU.popitem(last=False)
+        return data
+
+    f = _get_handle(nwb_path)
+    names = [(n, o) for n, o in f.acquisition.items()
+             if (getattr(o, "unit", "") or "").lower() in {"volts", "v", ""}]
+    if sweep_idx < 0 or sweep_idx >= len(names):
+        raise IndexError(f"sweep_idx {sweep_idx} out of range (have {len(names)})")
+    name, obj = names[sweep_idx]
+    data = np.asarray(obj.data[:]).reshape(-1).astype(np.float64)
+    rate = float(getattr(obj, "rate", 0) or 0)
+    t = np.arange(len(data)) / rate if rate > 0 else np.arange(len(data), dtype=float)
+    x_out, y_out = _lttb(t, data, 600) if len(data) > 600 else (t, data)
+    # Render tiny PNG — no axes labels (the tile shows the title above the img)
+    fig = plt.figure(figsize=(w / 72, h / 72), dpi=72)
+    ax = fig.add_axes([0.04, 0.06, 0.94, 0.92])
+    ax.plot(x_out, y_out * 1000.0, lw=0.6, color="#222")
+    ax.set_xticks([]); ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.5); spine.set_color("#bbb")
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=72)
+    plt.close(fig)
+    png_bytes = buf.getvalue()
+    with _THUMB_LRU_LOCK:
+        _THUMB_LRU[key] = png_bytes
+        while len(_THUMB_LRU) > _THUMB_LRU_MAX:
+            _THUMB_LRU.popitem(last=False)
+    if disk_path:
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        disk_path.write_bytes(png_bytes)
+    return png_bytes
+
+
 def _read_trace(nwb_path: Path, sweep_idx: int, max_points: int) -> dict[str, Any]:
     f = _get_handle(nwb_path)
     names = []
@@ -249,6 +318,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_png(self, status: int, png_bytes: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(png_bytes)))
+        # 1 day browser cache: same (sha,idx,w,h) → same image forever
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(png_bytes)
+
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler convention)
         try:
             self._route()
@@ -278,6 +356,32 @@ class _Handler(BaseHTTPRequestHandler):
                 "n_total": _total_cells,
                 "cells": _flag_cells,
             })
+            return
+
+        if path == "/api/families":
+            # Table the viewer uses to compute "implicated families" per cell —
+            # mirrors families.py so the client doesn't need to duplicate it.
+            self._send_json(HTTPStatus.OK, {
+                "metric_to_family": METRIC_TO_FAMILY,
+                "pseudo_labels": PSEUDO_METRIC_LABELS,
+            })
+            return
+
+        if path.startswith("/api/thumb/"):
+            rest = path[len("/api/thumb/"):]
+            cell_id, _, idx_str = rest.partition("/")
+            nwb = _manifest_lookup.get(cell_id)
+            if not nwb:
+                raise FileNotFoundError(f"cell_id not in manifest: {cell_id}")
+            try:
+                idx = int(idx_str)
+            except ValueError as e:
+                raise IndexError(f"bad sweep index {idx_str!r}") from e
+            w = max(80, min(600, int(params.get("w", "220"))))
+            h = max(40, min(400, int(params.get("h", "100"))))
+            sha = _cell_sha.get(cell_id) or ""
+            png = _render_sweep_thumb(Path(nwb), sha, idx, w, h)
+            self._send_png(HTTPStatus.OK, png)
             return
 
         if path == "/qc_report.csv":
@@ -326,7 +430,7 @@ def _viewer_html_template() -> str:
 def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     """Block while serving on host:port. Ctrl-C to stop."""
     global _manifest_lookup, _cell_sha, _report_path, _template_html, _project_name, _family_map
-    global _flag_cells, _total_cells
+    global _flag_cells, _total_cells, _thumbnails_dir, _thumb_disk_cache_enabled
     if not cfg.manifest_path or not cfg.manifest_path.exists():
         raise FileNotFoundError(
             f"manifest not found at {cfg.manifest_path}; run `nwb-qc run --config <yaml>` first")
@@ -338,6 +442,8 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     _project_name = cfg.project_name
     _family_map = StimulusFamilyMap(cfg.stimulus_protocols)
     _flag_cells, _total_cells = _build_flag_cells(cfg.report_csv) if cfg.report_csv else ([], 0)
+    _thumbnails_dir = cfg.thumbnails_dir
+    _thumb_disk_cache_enabled = bool(getattr(cfg, "viewer_cache_thumbnails", True))
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
     print(f"nwb-qc serve · {cfg.project_name} · {url}")

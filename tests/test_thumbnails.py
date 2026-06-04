@@ -9,7 +9,7 @@ import pynwb
 import pytest
 
 from nwb_trace_qc.config import default_families
-from nwb_trace_qc.pipeline import _make_thumbnail
+from nwb_trace_qc.pipeline import _make_thumbnail, _stratified_picks
 
 
 def _make_nwb_with(sweep_names: list[str], path: Path) -> None:
@@ -91,3 +91,43 @@ def test_render_error_returns_status(tmp_path: Path):
     )
     assert result is None
     assert status == "render_error"
+
+
+def test_stratified_picks_takes_endpoints_and_middle():
+    """With 10 candidates and max_n=3, picks should be #0, #5 (or #4), #9 —
+    not #0/#1/#2. Surfaces within-family drift."""
+    candidates = list(range(10))
+    picks = _stratified_picks(candidates, max_n=3)
+    assert picks[0] == 0
+    assert picks[-1] == 9
+    # Middle pick is within ±1 of the true midpoint (rounding tolerance)
+    assert abs(picks[1] - 5) <= 1
+
+
+def test_stratified_picks_returns_all_when_short():
+    assert _stratified_picks([7, 8, 9], max_n=3) == [7, 8, 9]
+    assert _stratified_picks([7, 8], max_n=3) == [7, 8]
+    assert _stratified_picks([42], max_n=3) == [42]
+    assert _stratified_picks([], max_n=3) == []
+
+
+def test_stratified_picks_dedups_on_tiny_lists():
+    """max_n=3 over a list of 2 rounds to indices (0, 1, 1) — dedup to (0, 1)."""
+    picks = _stratified_picks([10, 20], max_n=3)
+    assert picks == [10, 20]
+
+
+def test_make_thumbnail_uses_stratified_picks(tmp_path: Path):
+    """An NWB with 5 APWaveform sweeps should have its 1st / 3rd-or-middle / 5th
+    rendered in the static thumbnail (not 1/2/3)."""
+    nwb = tmp_path / "cell.nwb"
+    _make_nwb_with([f"ic__APWaveform__{i:03d}" for i in range(1, 6)], nwb)
+    out = tmp_path / "thumb.png"
+    result, status = _make_thumbnail(
+        nwb, out, families=default_families(),
+        reasons=["ap_amp_overshoot_mv"],  # → wanted = {ap_waveform}
+    )
+    assert status == "rendered"
+    assert result is not None
+    # We can't inspect the PNG content easily, but the rendering worked end-to-end.
+    # The stratified-picks unit test above pins down the selection itself.

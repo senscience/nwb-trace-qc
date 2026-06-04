@@ -113,6 +113,9 @@ class ProjectConfig(BaseModel):
     thumbnails_dir: Path | None = None
     cell_table: CellTable | None = None
     vision_judge: VisionJudgeConfig = Field(default_factory=VisionJudgeConfig)
+    # Interactive viewer settings
+    viewer_url: str = "http://127.0.0.1:8765"
+    viewer_cache_thumbnails: bool = True
     # absolute base path used to resolve all other relative paths (set by loader)
     config_path: Path | None = None
 
