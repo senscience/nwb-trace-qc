@@ -540,7 +540,8 @@ def run(
                  thresholds_fp=str(cfg.thresholds_file),
                  viewer_url=cfg.viewer_url,
                  thresholds=thresholds,
-                 cohort_stats=cohort_stats)
+                 cohort_stats=cohort_stats,
+                 config_path=str(cfg.config_path) if cfg.config_path else None)
     viewer_src = Path(__file__).parent / "templates" / "viewer.html"
     if viewer_src.exists():
         viewer_dst = cfg.report_html.parent / "qc_viewer.html"

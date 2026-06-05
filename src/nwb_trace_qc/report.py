@@ -216,6 +216,14 @@ VERDICT_TEXT = {
 }
 
 
+def _viewer_start_cmd(config_path: str | None) -> str:
+    """Build the exact shell command the user needs to run to start the viewer.
+    Falls back to a generic form when no config_path is wired through."""
+    if config_path:
+        return f"nwb-qc serve --config {config_path}"
+    return "nwb-qc serve --config <your_project_yaml>"
+
+
 def _png_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
@@ -233,7 +241,8 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 metric_columns: list[str] | None = None,
                 viewer_url: str = "http://127.0.0.1:8765",
                 thresholds: dict[str, dict] | None = None,
-                cohort_stats: dict[str, dict] | None = None) -> str:
+                cohort_stats: dict[str, dict] | None = None,
+                config_path: str | None = None) -> str:
     """Render the full self-contained HTML report.
 
     `report_df` must have columns: cell_id, dataset, computed_verdict, final_verdict,
@@ -346,6 +355,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 f"<div class='implicated-line'><b>Inspect these families:</b> {impl_chips}"
                 f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
                 f"target='_blank' rel='noopener' "
+                f"onclick='return _openViewer(event, this)' "
                 f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
             )
         else:
@@ -353,6 +363,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 f"<div class='implicated-line'>"
                 f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
                 f"target='_blank' rel='noopener' "
+                f"onclick='return _openViewer(event, this)' "
                 f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
             )
         override_block = ""
@@ -524,12 +535,30 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .override-template {{ font-size: 0.8rem; color: #666; padding: 0.5rem; }}
   pre {{ background: #f4f6f8; padding: 0.4rem; border-radius: 3px; white-space: pre-wrap; }}
   .row.hidden, .detail.hidden {{ display: none !important; }}
+  /* Viewer-status banner */
+  .viewer-banner {{ background: #fff8db; border-left: 3px solid #e0b54a; padding: 0.45rem 0.75rem; margin: 0.75rem 0; font-size: 0.85rem; display: none; }}
+  .viewer-banner.show {{ display: block; }}
+  .viewer-banner code {{ background: #fff; padding: 0.1rem 0.4rem; border: 1px solid #e0b54a; border-radius: 2px; font-size: 0.88rem; user-select: all; }}
+  .viewer-banner .copy-btn {{ margin-left: 0.4rem; padding: 0.15rem 0.5rem; font-size: 0.75rem; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 2px; }}
+  .viewer-banner .copy-btn:hover {{ background: #f4f6f8; }}
 </style>
 </head><body>
 <h1>{html.escape(project_name)} — QC report</h1>
 <div class='meta'>
   Pipeline v{pipeline_version} · Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} · Thresholds: <code>{html.escape(thresholds_fp)}</code>
-  · <a href="qc_viewer.html" title="Available when served via `nwb-qc serve`">Open interactive viewer →</a>
+  · <a id='viewer-link-header' href="{html.escape(viewer_url)}/" target='_blank' rel='noopener'
+       onclick='return _openViewer(event, this)'
+       title="Requires `nwb-qc serve` to be running on {html.escape(viewer_url)}">Open interactive viewer →</a>
+</div>
+
+<!-- Viewer-availability banner: shown when a deep-link click discovers the
+     viewer isn't running. Tells the user the exact command to start it. -->
+<div id='viewer-banner' class='viewer-banner'>
+  <b>Interactive viewer isn't running.</b>
+  Start it in a terminal, then click any "Inspect all sweeps →" link again:
+  <code id='viewer-start-cmd'>{html.escape(_viewer_start_cmd(config_path))}</code>
+  <button class='copy-btn' onclick='_copyStartCmd()'>copy</button>
+  <button class='copy-btn' onclick='_hideBanner()'>dismiss</button>
 </div>
 
 <div class='summary'>
@@ -623,6 +652,57 @@ document.querySelectorAll('.controls button').forEach(b => b.addEventListener('c
 }}));
 document.getElementById('search').addEventListener('input', applyFilters);
 applyFilters();
+
+// Viewer-availability check: every "Open viewer →" / "Inspect all sweeps →"
+// link routes through here. We probe /api/cells with a short timeout; if it
+// resolves, the viewer is up and we let the link's default navigation happen
+// (new tab via target=_blank). If the fetch fails (ERR_CONNECTION_REFUSED
+// when nwb-qc serve isn't running), we show the help banner with the exact
+// start command instead of letting the browser show its raw error page.
+async function _openViewer(event, link) {{
+  event.preventDefault();
+  const url = link.href;
+  const base = url.split('?')[0].replace(/\\/$/, '');
+  const probe = base + '/api/cells';
+  try {{
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 1200);
+    // no-cors so we don't need CORS headers; fetch() still rejects on
+    // network failure (which is what we care about here).
+    await fetch(probe, {{mode: 'no-cors', signal: ctrl.signal}});
+    // Reached: server responded. Open the link in a new tab.
+    window.open(url, '_blank', 'noopener');
+  }} catch (e) {{
+    // Server is down — show the start-command banner.
+    const banner = document.getElementById('viewer-banner');
+    if (banner) {{
+      banner.classList.add('show');
+      banner.scrollIntoView({{behavior: 'smooth', block: 'nearest'}});
+    }}
+  }}
+  return false;
+}}
+
+function _copyStartCmd() {{
+  const code = document.getElementById('viewer-start-cmd');
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent).then(() => {{
+    const orig = code.textContent;
+    code.textContent = '✓ copied';
+    setTimeout(() => code.textContent = orig, 1200);
+  }}).catch(() => {{
+    // Fallback: select the text so the user can Cmd-C manually
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+  }});
+}}
+
+function _hideBanner() {{
+  const banner = document.getElementById('viewer-banner');
+  if (banner) banner.classList.remove('show');
+}}
 // Naive column sort
 document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {{
   const tbody = th.closest('table').tbody = th.closest('table').querySelector('tbody');
@@ -648,7 +728,8 @@ def write_report(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                  pipeline_version: str, thresholds_fp: str = "",
                  viewer_url: str = "http://127.0.0.1:8765",
                  thresholds: dict[str, dict] | None = None,
-                 cohort_stats: dict[str, dict] | None = None) -> None:
+                 cohort_stats: dict[str, dict] | None = None,
+                 config_path: str | None = None) -> None:
     html_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     html_str = render_html(
@@ -659,6 +740,7 @@ def write_report(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
         viewer_url=viewer_url,
         thresholds=thresholds,
         cohort_stats=cohort_stats,
+        config_path=config_path,
     )
     html_path.write_text(html_str, encoding="utf-8")
     # CSV: flatten triggered_metrics to a string
