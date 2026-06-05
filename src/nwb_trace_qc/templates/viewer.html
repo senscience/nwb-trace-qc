@@ -23,13 +23,19 @@
   #cell-header { padding: .5rem 1rem; background: #fff; border-bottom: 1px solid #eee; font-size: .9rem; }
   #cell-header .cell-id { font-weight: 600; font-size: 1rem; }
   #cell-header .triggered { color: #666; font-size: .8rem; margin-top: .25rem; }
+  #cell-header .triggered .chip { display: inline-block; padding: 1px 6px; margin: 0 .15rem .15rem 0; border-radius: 2px; font-size: .72rem; }
+  #cell-header .triggered .chip-fail { background: #f8d7da; color: #721c24; font-weight: 600; }
+  #cell-header .triggered .chip-flag { background: #fff3cd; color: #856404; font-weight: 600; }
+  #cell-header .triggered .chip-advisory { opacity: 0.55; font-weight: normal; }
+  #cell-header .triggered details.advisory-fold { display: inline-block; }
+  #cell-header .triggered details.advisory-fold > summary { list-style: none; cursor: pointer; font-size: .68rem; color: #666; padding: 1px 5px; background: #f0f0f0; border-radius: 2px; border: 1px dashed #ccc; }
+  #cell-header .triggered details.advisory-fold > summary::-webkit-details-marker { display: none; }
   #cell-header .implicated { color: #444; font-size: .8rem; margin-top: .2rem; }
   #cell-header .fam-chip { display: inline-block; background: #fff3cd; color: #856404; padding: 1px 6px; border-radius: 2px; margin-right: .25rem; font-size: .72rem; font-weight: 600; }
-  #trim-strip { background: #fff3cd; color: #856404; padding: .4rem 1rem; border-bottom: 1px solid #eee; border-left: 4px solid #e0b54a; font-size: .82rem; line-height: 1.4; }
-  #metric-table { background: #fff; padding: .35rem 1rem; border-bottom: 1px solid #eee; font-size: .78rem; max-height: 80px; overflow-y: auto; }
-  #metric-table .row { display: inline-block; margin-right: 1.25rem; }
-  #metric-table .k { color: #666; }
-  #metric-table .v { font-weight: 600; }
+  /* Trim banner: prominent, top of the right pane, impossible to miss when present */
+  #trim-strip { background: #fff3cd; color: #856404; padding: .75rem 1rem; border-bottom: 2px solid #e0b54a; border-left: 6px solid #c89225; font-size: .92rem; line-height: 1.5; }
+  #trim-strip .icon { font-size: 1.3rem; margin-right: .35rem; vertical-align: -0.1rem; }
+  #trim-strip .where { font-weight: 700; }
   #content { display: grid; grid-template-columns: 280px 1fr; min-height: 0; overflow: hidden; }
   /* Sweep grid (left): tiles with lazy-loaded thumbnails */
   #sweep-list { background: #fff; border-right: 1px solid #eee; overflow-y: auto; font-size: .75rem; padding: 0; }
@@ -85,9 +91,8 @@
     <ul id="cell-list"><li>loading…</li></ul>
   </aside>
   <section id="right">
-    <div id="cell-header"><span class="cell-id">select a cell on the left</span></div>
     <div id="trim-strip" style="display:none"></div>
-    <div id="metric-table"></div>
+    <div id="cell-header"><span class="cell-id">select a cell on the left</span></div>
     <div id="content">
       <aside id="sweep-list"></aside>
       <div id="plots">
@@ -170,9 +175,9 @@ function renderCellList() {
   const ul = document.getElementById('cell-list');
   ul.innerHTML = '';
   const filtered = CELLS.filter(c => !q || (c.cell_id||'').toLowerCase().includes(q));
-  // Server already returns fail-first; the JS-side sort preserves that
-  // (fail < flag < pass in rank, then alpha on cell_id).
-  const rank = {fail: 0, flag: 1, pass: 2};
+  // Server returns flag-first (borderline → human triage), then fail
+  // (clearly-bad → mostly exclude). JS-side sort preserves that order.
+  const rank = {flag: 0, fail: 1, pass: 2};
   filtered.sort((a, b) => {
     const ra = rank[a.final_verdict] ?? 3;
     const rb = rank[b.final_verdict] ?? 3;
@@ -197,62 +202,65 @@ function renderCellList() {
   }
 }
 
-function renderMetricTable(row) {
-  const el = document.getElementById('metric-table');
-  if (!row) { el.innerHTML = ''; return; }
-  const parts = [];
-  for (const [k, v] of Object.entries(row)) {
-    if (SKIP_KEYS.has(k)) continue;
-    if (v === null || v === undefined || v === '' || (typeof v === 'number' && Number.isNaN(v))) continue;
-    let display = v;
-    if (typeof v === 'number') display = Math.abs(v) >= 100 ? v.toFixed(1) : v.toPrecision(4);
-    parts.push(`<span class="row"><span class="k">${k}:</span> <span class="v">${display}</span></span>`);
-  }
-  el.innerHTML = parts.join('') || '<span style="color:#888;font-style:italic">no metric values</span>';
-}
-
 async function selectCell(cellId) {
   activeCell = cellId;
   document.querySelectorAll('#cell-list li').forEach(li => li.classList.toggle('active', li.dataset.cellid === cellId));
   const row = CELLS.find(c => c.cell_id === cellId) || {};
   const implicated = implicatedFamiliesFor(row);
   const verdict = row.final_verdict || '';
-  const triggered = Array.isArray(row.triggered_metrics)
-    ? row.triggered_metrics.map(t => {
-        const fam = (t && t.metric) ? METRIC_TO_FAMILY[t.metric] : null;
-        const famTag = fam ? ` · ${fam}` : '';
-        return `${t.metric} (${t.reason||t.verdict})${famTag}`;
-      }).join(', ')
-    : '';
+  // Tiered triggered chips: critical inline (eye-catching), advisory tucked
+  // behind a "+N advisory" toggle (matches the v0.6.0 report layout).
+  const items = Array.isArray(row.triggered_metrics) ? row.triggered_metrics : [];
+  const renderChip = (t, advisory) => {
+    const v = t.verdict || 'flag';
+    const fam = t.metric ? METRIC_TO_FAMILY[t.metric] : null;
+    const famTag = fam ? ` · ${fam}` : '';
+    const cls = `chip chip-${v}` + (advisory ? ' chip-advisory' : '');
+    return `<span class="${cls}">${t.metric} (${t.reason || t.verdict})${famTag}</span>`;
+  };
+  const critItems = items.filter(t => t.critical !== false);   // default critical
+  const advItems  = items.filter(t => t.critical === false);
+  const critHtml = critItems.map(t => renderChip(t, false)).join('');
+  const advHtml  = advItems.map(t => renderChip(t, true)).join('');
+  const triggeredBlock = items.length
+    ? (
+        critHtml +
+        (advItems.length
+          ? ` <details class='advisory-fold'><summary>+${advItems.length} advisory</summary>${advHtml}</details>`
+          : '')
+      )
+    : '<span style="color:#999">no rule triggers</span>';
+
   const famChips = [...implicated].sort().map(f => `<span class="fam-chip">${f}</span>`).join('');
   const implLine = implicated.size
     ? `<div class="implicated"><b>Inspect these families:</b> ${famChips}</div>`
     : '';
   document.querySelector('#cell-header').innerHTML =
     `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
-    `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>` +
+    `<div class="triggered">${triggeredBlock}</div>` +
     implLine;
 
-  // Recording-trim strip (v0.4.0+): surface when bad-ending detection trimmed
-  // the tail so the user knows the metrics reflect the pre-degradation window.
+  // Recording-trim BANNER (prominent — sits above the cell header). Surfaces
+  // when bad-ending detection trimmed the tail so the user knows the metrics
+  // reflect the pre-degradation window.
   const trimEl = document.getElementById('trim-strip');
   const nTrim = Number(row.n_sweeps_trimmed || 0);
   const cutoff = row.bad_ending_at_sweep;
   const total = row.n_sweeps_total;
   if (nTrim > 0) {
-    const reason = row.bad_ending_reason ? ` (${row.bad_ending_reason})` : '';
+    const reason = row.bad_ending_reason ? ` <i>(${row.bad_ending_reason})</i>` : '';
     const where = (cutoff !== undefined && cutoff !== null && !Number.isNaN(cutoff))
-      ? ` at sweep ${cutoff}${total ? '/' + total : ''}`
+      ? ` <span class="where">at sweep ${cutoff}${total ? '/' + total : ''}</span>`
       : '';
     trimEl.innerHTML =
-      `<b>⚠ Recording trimmed${where}${reason}.</b> ${nTrim} tail sweep(s) excluded ` +
-      `from the metric scalars — the rule verdicts reflect the pre-degradation period only.`;
+      `<span class="icon">⚠</span><b>Recording trimmed${where}</b>${reason}. ` +
+      `${nTrim} tail sweep${nTrim === 1 ? '' : 's'} excluded from the metric scalars — ` +
+      `the verdicts above reflect the pre-degradation period only.`;
     trimEl.style.display = '';
   } else {
     trimEl.innerHTML = '';
     trimEl.style.display = 'none';
   }
-  renderMetricTable(row);
   for (let i = 0; i < 4; i++) showLoading(i);
 
   if (!sweepsCache[cellId]) {

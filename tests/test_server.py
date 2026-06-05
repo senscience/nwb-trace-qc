@@ -57,9 +57,11 @@ def test_build_cells_for_viewer_includes_flag_and_fail_strips_nans(tmp_path: Pat
     assert total == 4
     # Pass excluded; flag + fail kept
     assert {c["cell_id"] for c in cells} == {"c2", "c3", "c4"}
-    # Server-side ordering: fail first, then flag (ties alpha by cell_id)
-    assert cells[0]["cell_id"] == "c4"
-    assert cells[0]["final_verdict"] == "fail"
+    # Server-side ordering: FLAG first (borderline → triage), then FAIL.
+    # Ties broken alphabetically by cell_id.
+    assert cells[0]["final_verdict"] == "flag"
+    assert cells[-1]["cell_id"] == "c4"
+    assert cells[-1]["final_verdict"] == "fail"
     # Per-cell NaN stripping still in effect
     c2 = next(c for c in cells if c["cell_id"] == "c2")
     c3 = next(c for c in cells if c["cell_id"] == "c3")

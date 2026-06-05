@@ -276,8 +276,10 @@ def _build_cells_for_viewer(report_path: Path) -> tuple[list[dict[str, Any]], in
     if "final_verdict" not in df.columns:
         return [], total
     keep = df[df["final_verdict"].isin(["flag", "fail"])].copy()
-    # Sort: fail first, then flag; ties by cell_id alpha so the order is stable.
-    verdict_rank = {"fail": 0, "flag": 1}
+    # Sort: FLAG first (the borderline cells that need human judgement to triage),
+    # then FAIL (the clearly-bad ones that mostly just need to be excluded).
+    # Ties broken by cell_id alpha so the order is stable across runs.
+    verdict_rank = {"flag": 0, "fail": 1}
     keep = keep.assign(_rank=keep["final_verdict"].map(verdict_rank).fillna(2))
     keep = keep.sort_values(["_rank", "cell_id"]).drop(columns=["_rank"])
     out: list[dict[str, Any]] = []
