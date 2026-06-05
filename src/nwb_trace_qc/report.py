@@ -267,28 +267,46 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
             return []
         return raw if isinstance(raw, list) else (json.loads(raw) if raw else [])
 
+    def _render_one_chip(it, row):
+        cls = it.get("verdict", "pass")
+        metric = it.get("metric", "?")
+        label = f"{metric} {it.get('reason', '') or ''}".strip()
+        fam = METRIC_TO_FAMILY.get(metric) or PSEUDO_METRIC_LABELS.get(metric)
+        fam_tag = (f"<span class='fam-tag'>· {html.escape(fam)}</span>"
+                   if fam else "")
+        explanation = _explain_trigger(it, row, cohort_stats)
+        tip = html.escape((METRIC_DESCRIPTIONS.get(metric) or {}).get("what", ""))
+        chip_classes = f"chip chip-{cls}"
+        if not it.get("critical", True):
+            chip_classes += " chip-advisory"
+        return (
+            f"<details class='chip-details'><summary class='{chip_classes}' title='{tip}'>"
+            f"{html.escape(label)}{fam_tag}</summary>"
+            f"<div class='chip-explain'>{explanation}</div>"
+            f"</details>"
+        )
+
     def _trigger_chips(items, row):
-        """Render colored chips for each triggered metric, tagged with its implicated
-        stimulus family so triagers know which sweeps to inspect. Each chip is
-        clickable: the plain-English explanation under it expands on click.
+        """v0.6.0: render CRITICAL triggered chips inline; collapse ADVISORY ones
+        behind a "show N more advisory" toggle. Critical fails are what
+        promoted the cell-level verdict; advisory chips are informational and
+        usually low-signal in the cohort (NaN-from-missing-data, peripheral
+        rules). This makes the per-cell scan actionable: a triager sees only
+        what matters for the verdict, with the long-tail hidden until asked.
         """
-        chips = []
-        for idx, it in enumerate(items):
-            cls = it.get("verdict", "pass")
-            metric = it.get("metric", "?")
-            label = f"{metric} {it.get('reason', '') or ''}".strip()
-            fam = METRIC_TO_FAMILY.get(metric) or PSEUDO_METRIC_LABELS.get(metric)
-            fam_tag = (f"<span class='fam-tag'>· {html.escape(fam)}</span>"
-                       if fam else "")
-            explanation = _explain_trigger(it, row, cohort_stats)
-            tip = html.escape((METRIC_DESCRIPTIONS.get(metric) or {}).get("what", ""))
-            chips.append(
-                f"<details class='chip-details'><summary class='chip chip-{cls}' title='{tip}'>"
-                f"{html.escape(label)}{fam_tag}</summary>"
-                f"<div class='chip-explain'>{explanation}</div>"
-                f"</details>"
-            )
-        return "".join(chips)
+        critical_items = [it for it in items if it.get("critical", True)]
+        advisory_items = [it for it in items if not it.get("critical", True)]
+        critical_html = "".join(_render_one_chip(it, row) for it in critical_items)
+        advisory_html = "".join(_render_one_chip(it, row) for it in advisory_items)
+        if not advisory_html:
+            return critical_html
+        return (
+            f"{critical_html}"
+            f"<details class='advisory-fold'>"
+            f"<summary>+{len(advisory_items)} advisory</summary>"
+            f"<div class='advisory-chips'>{advisory_html}</div>"
+            f"</details>"
+        )
 
     rows_html = []
     datasets_seen = sorted(report_df["dataset"].dropna().astype(str).unique())
@@ -378,7 +396,12 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
     {health_card}
     {implicated_block}
     <div class='detail-grid'>
-      <div class='detail-metrics'><table class='kv'>{full_metrics}</table></div>
+      <div class='detail-metrics'>
+        <details class='full-metrics-fold'>
+          <summary>show all metric values</summary>
+          <table class='kv'>{full_metrics}</table>
+        </details>
+      </div>
       <div class='detail-thumbs'>{thumb_html}</div>
     </div>
     <div class='override-template'>
@@ -449,6 +472,16 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .chip-fail {{ background: {VERDICT_COLORS['fail']}; color: {VERDICT_TEXT['fail']}; }}
   .chip-pass {{ background: {VERDICT_COLORS['pass']}; color: {VERDICT_TEXT['pass']}; }}
   .chip .fam-tag {{ margin-left: 0.3rem; opacity: 0.75; font-style: italic; font-size: 0.68rem; }}
+  /* v0.6.0: advisory chips visually de-emphasised vs critical ones */
+  .chip-advisory {{ opacity: 0.55; }}
+  details.advisory-fold {{ display: inline-block; margin-left: 0.3rem; vertical-align: top; }}
+  details.advisory-fold > summary {{ list-style: none; cursor: pointer; font-size: 0.7rem; color: #666; padding: 0.1rem 0.5rem; background: #f0f0f0; border-radius: 3px; border: 1px dashed #ccc; }}
+  details.advisory-fold > summary::-webkit-details-marker {{ display: none; }}
+  details.advisory-fold[open] > summary {{ background: #e7ecf2; border-style: solid; }}
+  details.advisory-fold .advisory-chips {{ padding: 0.4rem 0; }}
+  /* Full-metrics table collapsed by default */
+  details.full-metrics-fold > summary {{ cursor: pointer; font-size: 0.8rem; color: #555; margin: 0.4rem 0; padding: 0.2rem 0; }}
+  details.full-metrics-fold[open] > summary {{ color: #222; font-weight: 600; }}
   details.chip-details {{ display: inline-block; }}
   details.chip-details > summary {{ list-style: none; }}
   details.chip-details > summary::-webkit-details-marker {{ display: none; }}

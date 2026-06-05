@@ -398,6 +398,10 @@ def run(
     if cfg.thresholds_file is None or not cfg.thresholds_file.exists():
         raise FileNotFoundError(f"thresholds_file not found: {cfg.thresholds_file}")
     thresholds = load_thresholds(cfg.thresholds_file)
+    # v0.6.0: critical-metric whitelist. Empty config list ⇒ bundled defaults.
+    from .families import DEFAULT_CRITICAL_METRICS
+    critical_metrics = (set(cfg.critical_metrics) if cfg.critical_metrics
+                         else DEFAULT_CRITICAL_METRICS)
     rows = []
     total_th = int(manifest.shape[0])
     for i, r in enumerate(manifest.itertuples(index=False), start=1):
@@ -408,11 +412,14 @@ def run(
             rows.append({
                 "cell_id": r.cell_id, "dataset": r.dataset,
                 "nwb_path": r.nwb_path, "nwb_sha256": r.nwb_sha256,
-                "computed_verdict": "flag", "triggered_metrics": [{"metric": "_no_cache", "value": None, "verdict": "flag", "reason": "no metrics computed"}],
+                "computed_verdict": "flag",
+                "triggered_metrics": [{"metric": "_no_cache", "value": None,
+                                        "verdict": "flag", "reason": "no metrics computed",
+                                        "critical": True}],
             })
             continue
         m = metric_row.iloc[0].to_dict()
-        verdict, triggered = evaluate(m, thresholds)
+        verdict, triggered = evaluate(m, thresholds, critical_metrics=critical_metrics)
         rows.append({
             "cell_id": r.cell_id, "dataset": r.dataset,
             "nwb_path": r.nwb_path, "nwb_sha256": r.nwb_sha256,

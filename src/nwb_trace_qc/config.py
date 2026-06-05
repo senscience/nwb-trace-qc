@@ -132,6 +132,11 @@ class ProjectConfig(BaseModel):
     # Quality-of-recording controls (v0.4.0)
     trim_bad_ending: bool = True       # auto-detect + trim degraded tail sweeps
     use_efel: bool = True              # source AP/Vrest features from eFEL when available
+    # v0.6.0: which metrics' fails cascade to a cell-level fail. Empty list ⇒
+    # use the bundled DEFAULT_CRITICAL_METRICS. Anything outside this set is
+    # demoted from fail to flag at the cell level (still surfaced as an
+    # advisory chip in the report).
+    critical_metrics: list[str] = Field(default_factory=list)
     # absolute base path used to resolve all other relative paths (set by loader)
     config_path: Path | None = None
 

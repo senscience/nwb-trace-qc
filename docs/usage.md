@@ -6,6 +6,13 @@ The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the i
 
 ---
 
+## What changed in v0.6.0
+
+`PIPELINE_VERSION` bumped to `0.6.0`; v0.5.x cache invalidates automatically. Two report-UX changes addressing the "all cells fail / report too complicated" feedback:
+
+- **Critical-metric whitelist for cell verdicts.** With ~25 metrics in v0.5, almost every cell tripped at least one (often a missing-data NaN or a peripheral metric like `rs_compensation_pct`), so 100% of cells failed. Now only fails on a **critical** metric promote to a cell-level fail. The bundled critical set (`families.DEFAULT_CRITICAL_METRICS`) is: `rs_drift_pct`, `vrest_mv`, `ap_amp_overshoot_mv`, `ap_amplitude_mv`, `holding_current_drift_pa`, `qc_protocol_coverage`, `n_sweeps_clipped`, `n_sweeps_nan`. Everything else is advisory — its trigger chip is still surfaced (dimmer, behind a "+N advisory" toggle) but the cell verdict is capped at `flag`. Override per-project via `critical_metrics:` in the project YAML.
+- **Tiered report layout per cell.** The expand panel now leads with the health card + **critical-only** triggered chips. Advisory chips collapse behind a `+N advisory` toggle so the at-a-glance view stays focused on what actually drove the verdict. The full metric table (every column the cache emits) also collapses behind a "show all metric values" toggle. Thumbnails and viewer deep-link stay where they were. 90% of triage decisions should now be possible without expanding either fold.
+
 ## What changed in v0.5.0
 
 LNMC experimenter-guidance additions (see "Parameters to consider while evaluating quality of whole cell, current clamp recordings" — the eCode protocol guidance document). `PIPELINE_VERSION` bumped to `0.5.0` — the v0.4.x cache is invalidated automatically.

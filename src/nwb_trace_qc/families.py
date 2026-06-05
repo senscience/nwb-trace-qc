@@ -16,6 +16,22 @@ from __future__ import annotations
 from typing import Iterable
 
 
+# v0.6.0: which metrics' fails should cascade to a cell-level fail. Everything
+# outside this set is advisory — its fail verdict is demoted to flag at the
+# cell level. Calibrated for LNMC eCode-protocol cohorts; override per-project
+# via the `critical_metrics:` list in the project YAML.
+DEFAULT_CRITICAL_METRICS: frozenset[str] = frozenset({
+    "rs_drift_pct",             # access-resistance stability over the session
+    "vrest_mv",                 # true resting membrane potential
+    "ap_amp_overshoot_mv",      # AP peak above 0 mV
+    "ap_amplitude_mv",          # canonical AP amplitude (peak − threshold)
+    "holding_current_drift_pa", # seal stability (orthogonal to Rs)
+    "qc_protocol_coverage",     # missing essential families → can't QC at all
+    "n_sweeps_clipped",         # voltage rails hit → trace corrupted
+    "n_sweeps_nan",             # NaN samples → trace corrupted
+})
+
+
 METRIC_TO_FAMILY: dict[str, str] = {
     # Spontaneous-derived. v0.5.0 splits the family into:
     #   spontaneous_no_hold — true resting membrane potential (no current injected)

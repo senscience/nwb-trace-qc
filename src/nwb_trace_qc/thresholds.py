@@ -61,25 +61,51 @@ def evaluate_metric(value: Any, rules: dict[str, Any]) -> tuple[str, str | None]
     return "pass", None
 
 
-def evaluate(metrics: dict[str, Any], thresholds: dict[str, dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def evaluate(metrics: dict[str, Any], thresholds: dict[str, dict[str, Any]],
+             critical_metrics: set[str] | frozenset[str] | None = None
+             ) -> tuple[str, list[dict[str, Any]]]:
     """Return (overall_verdict, triggered).
 
-    `triggered` is a list of dicts: {metric, value, verdict, reason}.
+    `triggered` is a list of dicts: ``{metric, value, verdict, reason, critical}``.
+
+    v0.6.0 verdict logic: only fails on **critical** metrics promote to a
+    cell-level fail. Anything outside ``critical_metrics`` is "advisory" — its
+    triggered chip is still surfaced (with ``critical: False``) but the cell
+    verdict is capped at ``flag`` for advisory-only triggers. Pass `None` to
+    use the bundled `families.DEFAULT_CRITICAL_METRICS`.
     """
+    if critical_metrics is None:
+        from .families import DEFAULT_CRITICAL_METRICS
+        critical_metrics = DEFAULT_CRITICAL_METRICS
+
     triggered: list[dict[str, Any]] = []
-    worst = "pass"
+    worst_critical = "pass"
+    worst_advisory = "pass"
     for metric, rules in thresholds.items():
         if metric not in metrics:
             continue
         v = metrics[metric]
         verdict, reason = evaluate_metric(v, rules)
-        if verdict != "pass":
-            triggered.append({
-                "metric": metric,
-                "value": v,
-                "verdict": verdict,
-                "reason": reason,
-            })
-            if PRECEDENCE[verdict] > PRECEDENCE[worst]:
-                worst = verdict
-    return worst, triggered
+        if verdict == "pass":
+            continue
+        is_critical = metric in critical_metrics
+        triggered.append({
+            "metric": metric,
+            "value": v,
+            "verdict": verdict,
+            "reason": reason,
+            "critical": is_critical,
+        })
+        if is_critical:
+            if PRECEDENCE[verdict] > PRECEDENCE[worst_critical]:
+                worst_critical = verdict
+        else:
+            if PRECEDENCE[verdict] > PRECEDENCE[worst_advisory]:
+                worst_advisory = verdict
+
+    # Cell-level verdict = critical's worst, but advisory fails demote to flag.
+    if worst_critical != "pass":
+        return worst_critical, triggered
+    if worst_advisory == "fail":
+        return "flag", triggered
+    return worst_advisory, triggered
