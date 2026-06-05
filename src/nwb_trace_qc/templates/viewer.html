@@ -25,6 +25,7 @@
   #cell-header .triggered { color: #666; font-size: .8rem; margin-top: .25rem; }
   #cell-header .implicated { color: #444; font-size: .8rem; margin-top: .2rem; }
   #cell-header .fam-chip { display: inline-block; background: #fff3cd; color: #856404; padding: 1px 6px; border-radius: 2px; margin-right: .25rem; font-size: .72rem; font-weight: 600; }
+  #trim-strip { background: #fff3cd; color: #856404; padding: .4rem 1rem; border-bottom: 1px solid #eee; border-left: 4px solid #e0b54a; font-size: .82rem; line-height: 1.4; }
   #metric-table { background: #fff; padding: .35rem 1rem; border-bottom: 1px solid #eee; font-size: .78rem; max-height: 80px; overflow-y: auto; }
   #metric-table .row { display: inline-block; margin-right: 1.25rem; }
   #metric-table .k { color: #666; }
@@ -73,8 +74,8 @@
 </head><body>
 <header>
   <h1>{{PROJECT}} — interactive trace viewer</h1>
-  <span class="meta">flag cells (rule-based borderline) — click a cell, then any sweep tile</span>
-  <span class="count" id="flag-count">{{N_FLAG}} flag of {{N_TOTAL}} total</span>
+  <span class="meta">non-pass cells (fail + flag) — click a cell, then any sweep tile</span>
+  <span class="count" id="flag-count">{{N_FLAG}} non-pass of {{N_TOTAL}} total</span>
 </header>
 <main>
   <aside id="left">
@@ -84,7 +85,8 @@
     <ul id="cell-list"><li>loading…</li></ul>
   </aside>
   <section id="right">
-    <div id="cell-header"><span class="cell-id">select a flag cell on the left</span></div>
+    <div id="cell-header"><span class="cell-id">select a cell on the left</span></div>
+    <div id="trim-strip" style="display:none"></div>
     <div id="metric-table"></div>
     <div id="content">
       <aside id="sweep-list"></aside>
@@ -140,8 +142,18 @@ async function loadCells() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const body = await r.json();
     CELLS = body.cells || [];
-    document.getElementById('flag-count').textContent =
-      `${body.n_flag} flag of ${body.n_total} total`;
+    // Header: prefer the new split when present, fall back to legacy n_flag
+    // (which now actually means non-pass).
+    const nFail = body.n_fail_only;
+    const nFlag = body.n_flag_only;
+    const nAttention = body.n_attention ?? body.n_flag;
+    if (typeof nFail === 'number' && typeof nFlag === 'number') {
+      document.getElementById('flag-count').textContent =
+        `${nFail} fail · ${nFlag} flag of ${body.n_total} total`;
+    } else {
+      document.getElementById('flag-count').textContent =
+        `${nAttention} non-pass of ${body.n_total} total`;
+    }
   } catch (e) {
     document.getElementById('cell-list').innerHTML = `<li class="empty-state">error loading cells: ${e}</li>`;
     return;
@@ -158,7 +170,14 @@ function renderCellList() {
   const ul = document.getElementById('cell-list');
   ul.innerHTML = '';
   const filtered = CELLS.filter(c => !q || (c.cell_id||'').toLowerCase().includes(q));
-  filtered.sort((a, b) => (a.cell_id||'').localeCompare(b.cell_id||''));
+  // Server already returns fail-first; the JS-side sort preserves that
+  // (fail < flag < pass in rank, then alpha on cell_id).
+  const rank = {fail: 0, flag: 1, pass: 2};
+  filtered.sort((a, b) => {
+    const ra = rank[a.final_verdict] ?? 3;
+    const rb = rank[b.final_verdict] ?? 3;
+    return ra - rb || (a.cell_id||'').localeCompare(b.cell_id||'');
+  });
   filtered.slice(0, 500).forEach(c => {
     const li = document.createElement('li');
     li.dataset.cellid = c.cell_id;
@@ -174,7 +193,7 @@ function renderCellList() {
     ul.appendChild(li);
   }
   if (!filtered.length) {
-    ul.innerHTML = '<li class="empty-state">no flag cells</li>';
+    ul.innerHTML = '<li class="empty-state">no non-pass cells</li>';
   }
 }
 
@@ -213,6 +232,26 @@ async function selectCell(cellId) {
     `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
     `<div class="triggered">${triggered ? 'triggered: ' + triggered : 'no rule triggers'}</div>` +
     implLine;
+
+  // Recording-trim strip (v0.4.0+): surface when bad-ending detection trimmed
+  // the tail so the user knows the metrics reflect the pre-degradation window.
+  const trimEl = document.getElementById('trim-strip');
+  const nTrim = Number(row.n_sweeps_trimmed || 0);
+  const cutoff = row.bad_ending_at_sweep;
+  const total = row.n_sweeps_total;
+  if (nTrim > 0) {
+    const reason = row.bad_ending_reason ? ` (${row.bad_ending_reason})` : '';
+    const where = (cutoff !== undefined && cutoff !== null && !Number.isNaN(cutoff))
+      ? ` at sweep ${cutoff}${total ? '/' + total : ''}`
+      : '';
+    trimEl.innerHTML =
+      `<b>⚠ Recording trimmed${where}${reason}.</b> ${nTrim} tail sweep(s) excluded ` +
+      `from the metric scalars — the rule verdicts reflect the pre-degradation period only.`;
+    trimEl.style.display = '';
+  } else {
+    trimEl.innerHTML = '';
+    trimEl.style.display = 'none';
+  }
   renderMetricTable(row);
   for (let i = 0; i < 4; i++) showLoading(i);
 

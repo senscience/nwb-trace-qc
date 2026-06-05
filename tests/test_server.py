@@ -7,7 +7,13 @@ import pynwb
 import pytest
 
 from nwb_trace_qc import server as srv_mod
-from nwb_trace_qc.server import _build_flag_cells, _is_nan, _lttb
+from nwb_trace_qc.server import (
+    _build_cells_for_viewer,
+    _build_flag_cells,
+    _is_nan,
+    _lttb,
+    _sanitise_for_json,
+)
 
 
 def test_lttb_passes_through_when_short():
@@ -36,24 +42,54 @@ def test_lttb_preserves_extrema_approximately():
     assert yo[near_spike].max() >= 1.0  # spike substantially preserved
 
 
-def test_build_flag_cells_filters_to_flag_only_and_strips_nans(tmp_path: Path):
+def test_build_cells_for_viewer_includes_flag_and_fail_strips_nans(tmp_path: Path):
+    """The viewer cell list shows BOTH flag and fail (any non-pass); pass cells
+    are excluded; per-cell NaN columns are stripped; fail rows come before flag."""
     csv = tmp_path / "qc_report.csv"
     csv.write_text(
         "cell_id,dataset,final_verdict,vrest_mv,rs_drift_pct,ap_amp_overshoot_mv\n"
-        "c1,ds,pass,-65.0,2.0,80.0\n"
-        "c2,ds,flag,-60.0,,75.0\n"          # rs_drift_pct missing → stripped per-cell
-        "c3,ds,flag,-62.0,5.0,\n"           # ap_amp_overshoot_mv missing → stripped
-        "c4,ds,fail,-50.0,12.0,40.0\n"
+        "c1,ds,pass,-65.0,2.0,80.0\n"          # pass → excluded
+        "c2,ds,flag,-60.0,,75.0\n"             # rs_drift_pct stripped (NaN)
+        "c3,ds,flag,-62.0,5.0,\n"              # ap_amp_overshoot_mv stripped
+        "c4,ds,fail,-50.0,12.0,40.0\n"         # fail → INCLUDED in v0.5.x
     )
-    flag, total = _build_flag_cells(csv)
+    cells, total = _build_cells_for_viewer(csv)
     assert total == 4
-    assert {c["cell_id"] for c in flag} == {"c2", "c3"}
-    c2 = next(c for c in flag if c["cell_id"] == "c2")
-    c3 = next(c for c in flag if c["cell_id"] == "c3")
-    assert "rs_drift_pct" not in c2          # NaN stripped
-    assert "ap_amp_overshoot_mv" in c2       # present value retained
+    # Pass excluded; flag + fail kept
+    assert {c["cell_id"] for c in cells} == {"c2", "c3", "c4"}
+    # Server-side ordering: fail first, then flag (ties alpha by cell_id)
+    assert cells[0]["cell_id"] == "c4"
+    assert cells[0]["final_verdict"] == "fail"
+    # Per-cell NaN stripping still in effect
+    c2 = next(c for c in cells if c["cell_id"] == "c2")
+    c3 = next(c for c in cells if c["cell_id"] == "c3")
+    assert "rs_drift_pct" not in c2
+    assert "ap_amp_overshoot_mv" in c2
     assert "ap_amp_overshoot_mv" not in c3
     assert "rs_drift_pct" in c3
+    # Legacy alias still importable + returns the same shape
+    assert _build_flag_cells(csv) == _build_cells_for_viewer(csv)
+
+
+def test_sanitise_for_json_replaces_nan_with_none():
+    """The JSON sanitiser drops NaN → None so the browser's JSON.parse doesn't
+    choke on the invalid `NaN` token that json.dumps would otherwise emit."""
+    import math, json
+    payload = {
+        "a": float("nan"),
+        "b": [1.0, float("nan"), {"c": float("nan")}],
+        "d": "fine",
+        "e": 42,
+    }
+    clean = _sanitise_for_json(payload)
+    assert clean["a"] is None
+    assert clean["b"][0] == 1.0
+    assert clean["b"][1] is None
+    assert clean["b"][2]["c"] is None
+    assert clean["d"] == "fine"
+    assert clean["e"] == 42
+    # And the result is valid JSON that the browser would accept
+    json.loads(json.dumps(clean))    # would raise if NaN slipped through
 
 
 def test_is_nan_handles_python_floats_and_pandas_na():

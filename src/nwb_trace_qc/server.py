@@ -54,7 +54,7 @@ _template_html: str = ""
 _project_name: str = ""
 _family_map: StimulusFamilyMap | None = None
 _total_cells: int = 0
-_flag_cells: list[dict[str, Any]] = []
+_viewer_cells: list[dict[str, Any]] = []   # flag + fail rows (non-pass)
 _thumbnails_dir: Path | None = None
 _thumb_disk_cache_enabled: bool = True
 
@@ -260,17 +260,28 @@ def _is_nan(v: Any) -> bool:
         return False
 
 
-def _build_flag_cells(report_path: Path) -> tuple[list[dict[str, Any]], int]:
-    """Read qc_report.csv, return (flag_cell_dicts, total_cells)."""
+def _build_cells_for_viewer(report_path: Path) -> tuple[list[dict[str, Any]], int]:
+    """Read qc_report.csv and return every NON-PASS cell (flag + fail), sorted
+    fail-first so the worst recordings surface at the top of the list.
+
+    Returns ``(cells, total_cells_in_cohort)``. Pass cells are excluded — they
+    don't need inspection. The deep-link from the static report (any cell, any
+    verdict) lands here; the cell list now includes both flag and fail rows so
+    the link works for either.
+    """
     if not report_path.exists():
         return [], 0
     df = pd.read_csv(report_path)
     total = int(len(df))
     if "final_verdict" not in df.columns:
         return [], total
-    flag = df[df["final_verdict"] == "flag"].copy()
+    keep = df[df["final_verdict"].isin(["flag", "fail"])].copy()
+    # Sort: fail first, then flag; ties by cell_id alpha so the order is stable.
+    verdict_rank = {"fail": 0, "flag": 1}
+    keep = keep.assign(_rank=keep["final_verdict"].map(verdict_rank).fillna(2))
+    keep = keep.sort_values(["_rank", "cell_id"]).drop(columns=["_rank"])
     out: list[dict[str, Any]] = []
-    for r in flag.itertuples(index=False):
+    for r in keep.itertuples(index=False):
         d = r._asdict()
         # Strip NaN/null per cell so the per-cell metric table only shows present values.
         d = {k: v for k, v in d.items() if not _is_nan(v)}
@@ -285,6 +296,31 @@ def _build_flag_cells(report_path: Path) -> tuple[list[dict[str, Any]], int]:
     return out, total
 
 
+# Backwards-compat alias (other tools may still import the old name)
+_build_flag_cells = _build_cells_for_viewer
+
+
+def _sanitise_for_json(obj: Any) -> Any:
+    """Recursively replace NaN with None and convert numpy scalars to Python
+    types so json.dumps never emits the invalid ``NaN`` token (which would crash
+    the browser's JSON.parse on the receiving end).
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitise_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitise_for_json(v) for v in obj]
+    if isinstance(obj, float):
+        return None if math.isnan(obj) else obj
+    # numpy scalars (np.float64 NaN, np.int64, …) inherit from Python float/int
+    # for floats above; ints just pass through cleanly.
+    try:
+        if pd.isna(obj):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return obj
+
+
 # ─── HTTP handler ────────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
@@ -294,7 +330,7 @@ class _Handler(BaseHTTPRequestHandler):
         log.debug("%s - %s", self.client_address[0], fmt % args)
 
     def _send_json(self, status: int, obj: Any) -> None:
-        body = json.dumps(obj, default=str).encode("utf-8")
+        body = json.dumps(_sanitise_for_json(obj), default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -345,16 +381,25 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html", "/viewer.html"):
             html = (_template_html
                     .replace("{{PROJECT}}", _project_name)
-                    .replace("{{N_FLAG}}", str(len(_flag_cells)))
+                    .replace("{{N_FLAG}}", str(len(_viewer_cells)))
                     .replace("{{N_TOTAL}}", str(_total_cells)))
             self._send_html(HTTPStatus.OK, html)
             return
 
         if path == "/api/cells":
+            # `n_flag` is kept in the payload for backward compatibility with
+            # older viewer.html templates — it now actually counts flag+fail
+            # (the cells the viewer surfaces). Newer templates can read
+            # `n_attention` instead which makes the semantics explicit.
+            n_fail = sum(1 for c in _viewer_cells if c.get("final_verdict") == "fail")
+            n_flag = sum(1 for c in _viewer_cells if c.get("final_verdict") == "flag")
             self._send_json(HTTPStatus.OK, {
-                "n_flag": len(_flag_cells),
+                "n_flag": len(_viewer_cells),     # legacy: total non-pass
+                "n_attention": len(_viewer_cells),
+                "n_fail_only": n_fail,
+                "n_flag_only": n_flag,
                 "n_total": _total_cells,
-                "cells": _flag_cells,
+                "cells": _viewer_cells,
             })
             return
 
@@ -430,7 +475,7 @@ def _viewer_html_template() -> str:
 def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     """Block while serving on host:port. Ctrl-C to stop."""
     global _manifest_lookup, _cell_sha, _report_path, _template_html, _project_name, _family_map
-    global _flag_cells, _total_cells, _thumbnails_dir, _thumb_disk_cache_enabled
+    global _viewer_cells, _total_cells, _thumbnails_dir, _thumb_disk_cache_enabled
     if not cfg.manifest_path or not cfg.manifest_path.exists():
         raise FileNotFoundError(
             f"manifest not found at {cfg.manifest_path}; run `nwb-qc run --config <yaml>` first")
@@ -441,13 +486,17 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     _template_html = _viewer_html_template()
     _project_name = cfg.project_name
     _family_map = StimulusFamilyMap(cfg.stimulus_protocols)
-    _flag_cells, _total_cells = _build_flag_cells(cfg.report_csv) if cfg.report_csv else ([], 0)
+    _viewer_cells, _total_cells = (
+        _build_cells_for_viewer(cfg.report_csv) if cfg.report_csv else ([], 0)
+    )
     _thumbnails_dir = cfg.thumbnails_dir
     _thumb_disk_cache_enabled = bool(getattr(cfg, "viewer_cache_thumbnails", True))
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
     print(f"nwb-qc serve · {cfg.project_name} · {url}")
-    print(f"  cells: {_total_cells} total · {len(_flag_cells)} flag · report: {_report_path}")
+    n_fail = sum(1 for c in _viewer_cells if c.get("final_verdict") == "fail")
+    n_flag = sum(1 for c in _viewer_cells if c.get("final_verdict") == "flag")
+    print(f"  cells: {_total_cells} total · {n_fail} fail · {n_flag} flag · report: {_report_path}")
     print("  press Ctrl-C to stop")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
