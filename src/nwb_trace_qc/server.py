@@ -138,11 +138,18 @@ _SWEEPS_BY_SHA: dict[str, list[dict[str, Any]]] = {}
 
 
 def _read_sweeps(nwb_path: Path, sha: str | None = None) -> list[dict[str, Any]]:
+    """Return one record per VOLTAGE acquisition. `idx` is the position in the
+    voltage-only sequence — matching both `_read_trace`'s indexing and the
+    `bad_ending_at_sweep` cutoff emitted by metrics.compute_metrics. Used to
+    be the all-acquisitions index (a latent bug when the NWB had non-voltage
+    channels in its acquisition container).
+    """
     if sha and sha in _SWEEPS_BY_SHA:
         return _SWEEPS_BY_SHA[sha]
     f = _get_handle(nwb_path)
     out: list[dict[str, Any]] = []
-    for i, (name, obj) in enumerate(f.acquisition.items()):
+    voltage_idx = 0
+    for name, obj in f.acquisition.items():
         unit = (getattr(obj, "unit", "") or "").lower()
         if unit not in {"volts", "v", ""}:
             continue
@@ -154,10 +161,11 @@ def _read_sweeps(nwb_path: Path, sha: str | None = None) -> list[dict[str, Any]]
         sweep_num = parts[2] if len(parts) >= 3 else ""
         fam = _family_map.family_of(stim) if _family_map else None
         out.append({
-            "idx": i, "name": name, "family": fam, "stimulus_type": stim,
+            "idx": voltage_idx, "name": name, "family": fam, "stimulus_type": stim,
             "sweep_number": sweep_num, "n_samples": n_samp,
             "rate_hz": rate, "duration_s": round(duration_s, 4),
         })
+        voltage_idx += 1
     if sha:
         _SWEEPS_BY_SHA[sha] = out
     return out

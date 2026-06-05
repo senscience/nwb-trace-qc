@@ -16,6 +16,7 @@
   #left li:hover { background: #f4f6f8; }
   #left li.active { background: #e6f0ff; }
   #left .verdict { display: inline-block; padding: 1px 5px; border-radius: 2px; font-size: .68rem; margin-right: .3rem; vertical-align: middle; }
+  #left .trim-marker { display: inline-block; background: #c89225; color: #fff; padding: 0 4px; border-radius: 2px; font-size: .65rem; margin-left: .15rem; cursor: help; }
   .v-pass { background: #d4edda; color: #155724; }
   .v-flag { background: #fff3cd; color: #856404; }
   .v-fail { background: #f8d7da; color: #721c24; }
@@ -54,6 +55,13 @@
   .tile img { display: block; width: 100%; height: 60px; object-fit: fill; background: #fafbfc; }
   .tile .lbl { font-size: .65rem; color: #444; margin-top: 2px; padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tile .badge { position: absolute; top: 1px; right: 2px; font-size: .65rem; color: #856404; }
+  /* Trimmed sweeps (idx ≥ bad_ending_at_sweep): excluded from the metric
+     reductions. Make them visually obvious so the user can SEE where the
+     recording went bad on the sweep timeline. */
+  .tile.trimmed { background: repeating-linear-gradient(45deg, #fff, #fff 6px, #fbe6e6 6px, #fbe6e6 12px); border-color: #c89225; opacity: 0.55; }
+  .tile.trimmed img { opacity: 0.45; filter: grayscale(0.5); }
+  .tile.trimmed .lbl { color: #856404; font-style: italic; }
+  .tile .trim-badge { position: absolute; top: 1px; right: 2px; background: #c89225; color: #fff; font-size: .58rem; font-weight: 700; padding: 1px 4px; border-radius: 2px; letter-spacing: 0.02em; }
   /* Plot grid (right) */
   #plots {
     display: grid;
@@ -187,7 +195,14 @@ function renderCellList() {
     const li = document.createElement('li');
     li.dataset.cellid = c.cell_id;
     if (activeCell === c.cell_id) li.classList.add('active');
-    li.innerHTML = `<span class="verdict v-${c.final_verdict}">${(c.final_verdict||'').toUpperCase()}</span>${c.cell_id} <span style="color:#999;font-size:.72rem">(${c.dataset||''})</span>`;
+    // ✂ marker when the cell's recording was auto-trimmed by bad-ending
+    // detection — so you can scan the list and see which cells had degraded
+    // endings without clicking each one.
+    const nTrim = Number(c.n_sweeps_trimmed || 0);
+    const trimChip = nTrim > 0
+      ? ` <span class="trim-marker" title="trimmed ${nTrim} tail sweep${nTrim === 1 ? '' : 's'}${c.bad_ending_reason ? ' · ' + c.bad_ending_reason : ''}">✂</span>`
+      : '';
+    li.innerHTML = `<span class="verdict v-${c.final_verdict}">${(c.final_verdict||'').toUpperCase()}</span>${c.cell_id}${trimChip} <span style="color:#999;font-size:.72rem">(${c.dataset||''})</span>`;
     li.onclick = () => selectCell(c.cell_id);
     ul.appendChild(li);
   });
@@ -302,6 +317,16 @@ async function selectCell(cellId) {
 function renderSweepGrid(implicated) {
   const sw = document.getElementById('sweep-list');
   sw.innerHTML = '';
+  // Active cell's trim cutoff (NaN/None when no bad-ending was detected).
+  // Sweeps with idx >= cutoff were excluded from the metric reductions and
+  // are marked visually below so the user can see EXACTLY where the trim
+  // happened on the sweep timeline.
+  const row = CELLS.find(c => c.cell_id === activeCell) || {};
+  const cutoff = (typeof row.bad_ending_at_sweep === 'number'
+                   && !Number.isNaN(row.bad_ending_at_sweep))
+                 ? row.bad_ending_at_sweep : null;
+  const trimReason = row.bad_ending_reason || '';
+
   // Toolbar with implicated-only / all toggle
   const toolbar = document.createElement('div');
   toolbar.className = 'sweep-toolbar';
@@ -345,12 +370,19 @@ function renderSweepGrid(implicated) {
       tile.className = 'tile';
       if (implicated.has(s.family)) tile.classList.add('implicated');
       if (implicated.size && !implicated.has(s.family)) tile.classList.add('dimmed');
+      const isTrimmed = (cutoff !== null && s.idx >= cutoff);
+      if (isTrimmed) tile.classList.add('trimmed');
       tile.dataset.idx = s.idx;
       tile.dataset.family = s.family || '';
+      const trimTip = isTrimmed
+        ? `title="trimmed (sweep ${s.idx} ≥ cutoff ${cutoff}${trimReason ? ' · ' + trimReason : ''})"`
+        : '';
+      tile.setAttribute('data-tip', isTrimmed ? `trimmed — excluded from metrics` : '');
       tile.innerHTML = `
-        <img data-src="/api/thumb/${encodeURIComponent(activeCell)}/${s.idx}?w=220&h=70" alt="${s.stimulus_type} ${s.sweep_number}" loading="lazy"/>
+        <img data-src="/api/thumb/${encodeURIComponent(activeCell)}/${s.idx}?w=220&h=70" alt="${s.stimulus_type} ${s.sweep_number}" loading="lazy" ${trimTip}/>
         <div class="lbl">${s.stimulus_type} ${s.sweep_number}<span style="color:#999"> · ${s.duration_s.toFixed(2)}s</span></div>
-        ${implicated.has(s.family) ? '<span class="badge">⚠</span>' : ''}
+        ${isTrimmed ? '<span class="trim-badge" title="trimmed by bad-ending detection">✂ trimmed</span>' :
+                       (implicated.has(s.family) ? '<span class="badge">⚠</span>' : '')}
       `;
       tile.onclick = () => {
         const slot = slots.findIndex(x => x === null);
