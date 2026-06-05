@@ -13,7 +13,8 @@ from nwb_trace_qc.families import (
 
 def test_essential_metric_mappings():
     """A handful of metrics that drive QC verdicts must map to a family."""
-    assert family_for_metric("vrest_mv") == "spontaneous_hold"
+    # v0.5.0: vrest comes from `spontaneous_no_hold` (true Vrest, no Ihld)
+    assert family_for_metric("vrest_mv") == "spontaneous_no_hold"
     assert family_for_metric("rs_drift_pct") == "test_pulse"
     assert family_for_metric("ap_amp_overshoot_mv") == "ap_waveform"
     assert family_for_metric("late_instability_index") == "rest_firing"
@@ -34,13 +35,13 @@ def test_implicated_families_from_dict_list():
         {"metric": "vrest_drift_mv", "verdict": "flag"},          # dup family with vrest_mv
     ]
     fams = implicated_families(triggered)
-    assert fams == {"spontaneous_hold", "test_pulse"}
+    assert fams == {"spontaneous_no_hold", "test_pulse"}
 
 
 def test_implicated_families_from_bare_strings():
     """Also accept a list of bare metric names (used by some client code paths)."""
     assert implicated_families(["ap_amp_overshoot_mv", "vrest_mv"]) == \
-        {"ap_waveform", "spontaneous_hold"}
+        {"ap_waveform", "spontaneous_no_hold"}
 
 
 def test_implicated_families_empty_input():

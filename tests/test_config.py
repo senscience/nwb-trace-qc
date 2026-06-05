@@ -23,7 +23,10 @@ def test_minimal_config(tmp_path: Path):
     assert cfg.cache_path.name == "_qc_cache.parquet"
     assert cfg.report_html.name == "qc_report.html"
     # Default stimulus families present
-    assert "spontaneous_hold" in cfg.stimulus_protocols
+    # v0.5.0: spontaneous_hold split into spontaneous_no_hold (true Vrest) +
+    # spontaneous_held (Ihld monitoring)
+    assert "spontaneous_no_hold" in cfg.stimulus_protocols
+    assert "spontaneous_held" in cfg.stimulus_protocols
     assert "test_pulse" in cfg.stimulus_protocols
 
 

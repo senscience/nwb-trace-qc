@@ -39,7 +39,7 @@ _MIN_STIM_LEN_S = 0.010   # 10 ms
 # to symbolic names instead of stringly-typed magic.
 EFEL_VOLTAGE_BASE = "voltage_base"
 EFEL_AP_AMPLITUDE_FROM_VBASE = "AP_amplitude_from_voltagebase"
-EFEL_AP_AMPLITUDE = "AP_amplitude"
+EFEL_AP_AMPLITUDE = "AP_amplitude"   # peak − threshold (canonical AP amplitude)
 EFEL_PEAK_VOLTAGE = "peak_voltage"
 EFEL_AP_BEGIN_VOLTAGE = "AP_begin_voltage"
 EFEL_SPIKECOUNT = "Spikecount"

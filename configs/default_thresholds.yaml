@@ -117,11 +117,11 @@ ap_overshoot_session_drift_mv:
   flag_below: -10       # overshoot drops > 10 mV across the session
   fail_below: -20
 
-test_pulse_edge_overshoot_mv:
-  # Smooth "GOOD" test pulses show <5 mV at the step edge; sketched "BAD"
-  # examples show 15-25 mV of capacitive transient before settling.
-  flag_above: 8
-  fail_above: 20
+# test_pulse_edge_overshoot_mv: no auto rule by default (informational only).
+# Per LNMC experimenter guidance, the edge transient's MAGNITUDE is ambiguous —
+# a sharp transient is the good signature of active Rs compensation; a smooth
+# exponential is the bad signature (no compensation). Use rac_variability_pct
+# below for the cohort-stability check.
 
 ap_amp_overshoot_min_mv:
   # Per-sweep worst-case overshoot — flags the sketched "BAD too small" Fire Pattern
@@ -133,3 +133,36 @@ ap_amp_attenuation_frac:
   # Fraction of individual APs whose overshoot < 15 mV.
   flag_above: 0.10
   fail_above: 0.30
+
+# ────────────────────────────────────────────────────────────
+# v0.5.0 — LNMC experimenter-guidance additions
+# Rules reflect "Parameters to consider while evaluating quality of whole cell,
+# current clamp recordings" (eCode protocol guidance):
+#   - Rs compensation should be set during recording; check the metadata value
+#   - Rac variability across reps is the real Rs stability indicator
+#   - AP_amplitude (peak − threshold) is the canonical AP-amplitude definition
+#   - held_vm: monitored as separate from true Vrest
+# ────────────────────────────────────────────────────────────
+
+rs_compensation_pct:
+  # Flag when no compensation was applied (or no value was recorded);
+  # fail when negative or zero compensation slips through.
+  flag_below: 50
+  fail_below: 0
+
+rac_variability_pct:
+  # CV (std/median × 100) across per-Rac Rs estimates. > 20% suggests drift /
+  # instability; > 40% means the recording is unreliable on this metric.
+  flag_above: 20
+  fail_above: 40
+
+ap_amplitude_mv:
+  # Peak − threshold. Healthy pyramidal: 60–100 mV; < 40 mV is failing.
+  flag_below: 60
+  fail_below: 40
+
+held_vm_mv:
+  # The held membrane potential should match the lab's target (~-70 mV).
+  # Conservative flags catch drift away from the held setpoint.
+  flag_above: -55
+  flag_below: -85

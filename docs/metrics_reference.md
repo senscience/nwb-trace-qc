@@ -1,4 +1,4 @@
-# `nwb-trace-qc` metric reference (v0.4.0)
+# `nwb-trace-qc` metric reference (v0.5.0)
 
 For every metric `nwb-trace-qc` emits, this doc says (a) what the metric
 measures, (b) the healthy range, (c) the implicated stimulus family,
@@ -37,10 +37,17 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 
 ## `ap_amp_overshoot_mv`
 
-- **What it measures.** Median AP peak above 0 mV across all ap_waveform / rest_firing sweeps.
+- **What it measures.** Median AP peak above 0 mV across all ap_waveform / rest_firing sweeps. Distinct from `ap_amplitude_mv` (peak − threshold).
 - **Healthy range.** +20 to +40 mV (cortical pyramidal); ≥10 mV minimally acceptable.
 - **Implicated family.** `ap_waveform`
 - **Computed by.** eFEL feature `AP_amplitude_from_voltagebase` (derived (vbase + median(AP_amp_from_vbase))). Falls back to our custom helper on malformed sweeps.
+
+## `ap_amplitude_mv`
+
+- **What it measures.** Canonical AP amplitude (LNMC definition): peak voltage minus threshold voltage (the dV/dt-triggered onset). Median across all detected spikes in ap_waveform / rest_firing sweeps. Independent of resting-Vm baseline.
+- **Healthy range.** 60–100 mV for healthy cortical pyramidal cells; < 40 mV is degraded.
+- **Implicated family.** `ap_waveform`
+- **Computed by.** eFEL feature `AP_amplitude` (used directly (canonical: peak − threshold)). Falls back to our custom helper on malformed sweeps.
 
 ## `ap_failure_fraction`
 
@@ -81,21 +88,28 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 
 - **What it measures.** RMS noise of the spontaneous_hold baseline voltage.
 - **Healthy range.** < 1 mV (mainly electrode/amplifier coupling).
-- **Implicated family.** `spontaneous_hold`
+- **Implicated family.** `spontaneous_no_hold`
 - **Computed by.** `nwb-trace-qc` — RMS noise of the centred voltage in spontaneous_hold sweeps; median across sweeps.
+
+## `held_vm_mv`
+
+- **What it measures.** Held membrane potential under holding current. Sourced from `spontaneous_held` family sweeps (e.g. SponHold3 / SponHold30). Distinct from vrest_mv — this is the *target* potential held by Ihld.
+- **Healthy range.** Typically −60 to −80 mV. Should match the lab's protocol holding voltage.
+- **Implicated family.** `spontaneous_held`
+- **Computed by.** eFEL feature `voltage_base` (used directly (on spontaneous_held sweeps)). Falls back to our custom helper on malformed sweeps.
 
 ## `holding_current_drift_pa`
 
 - **What it measures.** Change in holding current from first to last sweep.
 - **Healthy range.** |Δ| < 50 pA — creeping demand signals seal leak.
-- **Implicated family.** `spontaneous_hold`
+- **Implicated family.** `spontaneous_held`
 - **Computed by.** `nwb-trace-qc` — Last-sweep baseline − first-sweep baseline (pA).
 
 ## `holding_current_pa`
 
 - **What it measures.** Baseline (pre-step) holding current; reflects seal quality.
 - **Healthy range.** |Ihld| < 100 pA at Vrest.
-- **Implicated family.** `spontaneous_hold`
+- **Implicated family.** `spontaneous_held`
 - **Computed by.** `nwb-trace-qc` — Median across sweeps of the mean baseline current (pre-step, 5 ms) in pA.
 
 ## `late_instability_index`
@@ -138,7 +152,7 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 - **What it measures.** Boolean: NWB carries at least one sweep from each essential family (spontaneous_hold, test_pulse, ap_waveform).
 - **Healthy range.** True. False ⇒ stimulus_protocols mapping incomplete or recording cut short.
 - **Implicated family.** `—`
-- **Computed by.** `nwb-trace-qc` — Boolean — does the NWB carry ≥1 sweep in each essential family.
+- **Computed by.** `nwb-trace-qc` — Boolean — does the NWB carry ≥1 sweep in each essential family (spontaneous + test_pulse + ap_waveform).
 
 ## `rac_decay_residual_rel`
 
@@ -146,6 +160,13 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 - **Healthy range.** < 0.05; > 0.15 indicates ringing/glitches.
 - **Implicated family.** `test_pulse`
 - **Computed by.** `nwb-trace-qc` — Relative residual of an exponential fit to the test-pulse recovery.
+
+## `rac_variability_pct`
+
+- **What it measures.** Coefficient of variation (std/median × 100) of per-Rac Rs estimates across the test_pulse sweeps. Catches non-monotonic instability across repetitions that rs_drift_pct (first vs last) misses.
+- **Healthy range.** < 20%; > 40% indicates dropping recording performance.
+- **Implicated family.** `test_pulse`
+- **Computed by.** `nwb-trace-qc` — CV (std/median × 100) of per-Rac Rs estimates across the test_pulse sweeps; needs ≥3 Rac sweeps. Catches non-monotonic Rs instability that rs_drift_pct misses.
 
 ## `rin_mohm`
 
@@ -160,6 +181,13 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 - **Healthy range.** > 0.9 (clean linear region).
 - **Implicated family.** `iv_subthreshold`
 - **Computed by.** `nwb-trace-qc` — R² of the same Rin linear fit.
+
+## `rs_compensation_pct`
+
+- **What it measures.** Series-resistance compensation percentage read from the NWB's IntracellularElectrode metadata (resistance_comp_correction). Indicates how much of Rs the experimenter compensated for at acquisition time.
+- **Healthy range.** Typically 60–80% (lab-dependent). 0 or NaN ⇒ no compensation recorded.
+- **Implicated family.** `test_pulse`
+- **Computed by.** `nwb-trace-qc` — Read from the NWB's IntracellularElectrode.resistance_comp_correction (or a lab_meta_data 'Rs' field). 0..1 fractions are normalised to 0..100%.
 
 ## `rs_drift_pct`
 
@@ -191,8 +219,8 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 
 ## `test_pulse_edge_overshoot_mv`
 
-- **What it measures.** Max peak deviation in 5–10 ms after a test-pulse edge vs the 20–50 ms plateau.
-- **Healthy range.** < 5 mV (smooth settling); > 20 mV = capacitive ringing / bad compensation.
+- **What it measures.** Magnitude of the step-edge voltage transient (5–10 ms post-edge vs 20–50 ms plateau). Note: per LNMC experimenter guidance, a SHARP transient is the GOOD signature of active Rs compensation; a smooth exponential decay indicates NO compensation. So this metric is informational — interpretation depends on whether you expect compensation in this protocol. Cross-reference rs_compensation_pct from metadata.
+- **Healthy range.** Cohort-dependent. Stable across reps is the real signal; rac_variability_pct quantifies that.
 - **Implicated family.** `test_pulse`
 - **Computed by.** `nwb-trace-qc` — Peak |dV| in 0–10 ms after a test-pulse edge minus the 20–50 ms plateau.
 
@@ -207,19 +235,19 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 
 - **What it measures.** Vrest delta from first to last spontaneous_hold sweep.
 - **Healthy range.** |Δ| < 5 mV across a healthy recording.
-- **Implicated family.** `spontaneous_hold`
+- **Implicated family.** `spontaneous_no_hold`
 - **Computed by.** `nwb-trace-qc` — first - last in chronological order across spontaneous_hold sweeps; emitted in mV.
 
 ## `vrest_mv`
 
-- **What it measures.** Resting membrane potential.
+- **What it measures.** Resting membrane potential — true Vrest (no holding current injected). Sourced from `spontaneous_no_hold` family sweeps (e.g. SponNonHold30).
 - **Healthy range.** −65 to −80 mV (cortical pyramidal); −55 to −90 mV more broadly.
-- **Implicated family.** `spontaneous_hold`
-- **Computed by.** eFEL feature `voltage_base` (used directly). Falls back to our custom helper on malformed sweeps.
+- **Implicated family.** `spontaneous_no_hold`
+- **Computed by.** eFEL feature `voltage_base` (used directly (on spontaneous_no_hold sweeps)). Falls back to our custom helper on malformed sweeps.
 
 ## `vrest_session_drift_mv`
 
 - **What it measures.** Vrest delta between 2nd half and 1st half of the session (medians).
 - **Healthy range.** |Δ| < 5 mV — early-warning seal degradation otherwise.
-- **Implicated family.** `spontaneous_hold`
+- **Implicated family.** `spontaneous_no_hold`
 - **Computed by.** `nwb-trace-qc` — median(Vrest in second half) − median(Vrest in first half) of the session.

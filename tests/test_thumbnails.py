@@ -169,7 +169,8 @@ def test_provenance_picker_helper_returns_first_and_last_for_drift_metrics(tmp_p
     triggered = [{"metric": "rs_drift_pct"}, {"metric": "vrest_mv"}]
     picks = _provenance_sweep_names(triggered, metric_row)
     assert picks["test_pulse"] == ["ic__Rac__000", "ic__Rac__011"]
-    assert picks["spontaneous_hold"] == ["ic__SponHold30__001", "ic__SponHold30__012"]
+    # v0.5.0: vrest_mv → spontaneous_no_hold (true Vrest source)
+    assert picks["spontaneous_no_hold"] == ["ic__SponHold30__001", "ic__SponHold30__012"]
 
 
 def test_make_thumbnail_uses_stratified_picks(tmp_path: Path):

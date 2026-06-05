@@ -87,8 +87,21 @@ class VisionJudgeConfig(BaseModel):
 
 
 # Canonical stimulus-protocol families. Keys are *family* names referenced by metrics.
+#
+# In v0.5.0 the legacy `spontaneous_hold` family is split into two semantically
+# distinct families (per LNMC experimenter guidance):
+#
+#   - spontaneous_no_hold: NO holding current injected — this is the TRUE resting
+#     membrane potential. Vrest_mv is sourced from these sweeps when present.
+#   - spontaneous_held:    holding current applied (typically -100 pA to clamp at
+#                          -70 mV). Source of held_vm_mv + holding_current_pa.
+#
+# Older project YAMLs that map protocols to `spontaneous_hold` continue to work —
+# metrics.py treats that family as a legacy fallback for both no-hold and held
+# semantics, with a notice logged once per run.
 _DEFAULT_FAMILIES = {
-    "spontaneous_hold": ["SponHold3", "SponHold30", "SponNoHold30", "StartHold"],
+    "spontaneous_no_hold": ["SponNonHold30", "SponNoHold30", "StartNoHold"],
+    "spontaneous_held":    ["SponHold3", "SponHold30", "StartHold"],
     "test_pulse": ["Rac", "TestAmpl", "TestRheo"],
     "iv_subthreshold": ["IV"],
     "ap_waveform": ["APWaveform"],

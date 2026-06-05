@@ -17,18 +17,23 @@ from typing import Iterable
 
 
 METRIC_TO_FAMILY: dict[str, str] = {
-    # Spontaneous-hold-derived
-    "vrest_mv":                       "spontaneous_hold",
-    "vrest_drift_mv":                 "spontaneous_hold",
-    "vrest_session_drift_mv":         "spontaneous_hold",
-    "baseline_rms_mv":                "spontaneous_hold",
-    "holding_current_pa":             "spontaneous_hold",
-    "holding_current_drift_pa":       "spontaneous_hold",
+    # Spontaneous-derived. v0.5.0 splits the family into:
+    #   spontaneous_no_hold — true resting membrane potential (no current injected)
+    #   spontaneous_held    — held under holding current (different semantic)
+    "vrest_mv":                       "spontaneous_no_hold",
+    "vrest_drift_mv":                 "spontaneous_no_hold",
+    "vrest_session_drift_mv":         "spontaneous_no_hold",
+    "held_vm_mv":                     "spontaneous_held",
+    "baseline_rms_mv":                "spontaneous_no_hold",
+    "holding_current_pa":             "spontaneous_held",
+    "holding_current_drift_pa":       "spontaneous_held",
     # Test-pulse-derived (Rs, decay shape, edge artifact)
     "rs_mohm_initial":                "test_pulse",
     "rs_mohm_final":                  "test_pulse",
     "rs_drift_pct":                   "test_pulse",
     "rs_session_drift_pct":           "test_pulse",
+    "rs_compensation_pct":            "test_pulse",
+    "rac_variability_pct":            "test_pulse",
     "rac_decay_residual_rel":         "test_pulse",
     "test_pulse_edge_overshoot_mv":   "test_pulse",
     # IV-derived
@@ -40,6 +45,7 @@ METRIC_TO_FAMILY: dict[str, str] = {
     "ap_amp_attenuation_frac":        "ap_waveform",
     "ap_overshoot_session_drift_mv":  "ap_waveform",
     "ap_threshold_drift_mv":          "ap_waveform",
+    "ap_amplitude_mv":                "ap_waveform",
     "ap_amp_cv":                      "ap_waveform",
     "ap_failure_fraction":            "ap_waveform",
     # Long-sweep / firing-train metrics
@@ -52,8 +58,15 @@ METRIC_TO_FAMILY: dict[str, str] = {
 # explanations. Lives here so report.py and viewer can stay in sync.
 METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "vrest_mv": {
-        "what": "Resting membrane potential.",
+        "what": "Resting membrane potential — true Vrest (no holding current injected). "
+                "Sourced from `spontaneous_no_hold` family sweeps (e.g. SponNonHold30).",
         "healthy": "−65 to −80 mV (cortical pyramidal); −55 to −90 mV more broadly.",
+    },
+    "held_vm_mv": {
+        "what": "Held membrane potential under holding current. Sourced from "
+                "`spontaneous_held` family sweeps (e.g. SponHold3 / SponHold30). "
+                "Distinct from vrest_mv — this is the *target* potential held by Ihld.",
+        "healthy": "Typically −60 to −80 mV. Should match the lab's protocol holding voltage.",
     },
     "vrest_drift_mv": {
         "what": "Vrest delta from first to last spontaneous_hold sweep.",
@@ -83,6 +96,18 @@ METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "what": "Rs delta between 2nd half and 1st half (medians), as % of 1st-half.",
         "healthy": "< 25% — seal stability check.",
     },
+    "rs_compensation_pct": {
+        "what": "Series-resistance compensation percentage read from the NWB's "
+                "IntracellularElectrode metadata (resistance_comp_correction). "
+                "Indicates how much of Rs the experimenter compensated for at acquisition time.",
+        "healthy": "Typically 60–80% (lab-dependent). 0 or NaN ⇒ no compensation recorded.",
+    },
+    "rac_variability_pct": {
+        "what": "Coefficient of variation (std/median × 100) of per-Rac Rs estimates "
+                "across the test_pulse sweeps. Catches non-monotonic instability "
+                "across repetitions that rs_drift_pct (first vs last) misses.",
+        "healthy": "< 20%; > 40% indicates dropping recording performance.",
+    },
     "rin_mohm": {
         "what": "Input resistance from subthreshold IV slope (V = Rin·I + offset).",
         "healthy": "50–150 MΩ for cortical pyramidal.",
@@ -100,8 +125,15 @@ METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "healthy": "|Δ| < 50 pA — creeping demand signals seal leak.",
     },
     "ap_amp_overshoot_mv": {
-        "what": "Median AP peak above 0 mV across all ap_waveform / rest_firing sweeps.",
+        "what": "Median AP peak above 0 mV across all ap_waveform / rest_firing sweeps. "
+                "Distinct from `ap_amplitude_mv` (peak − threshold).",
         "healthy": "+20 to +40 mV (cortical pyramidal); ≥10 mV minimally acceptable.",
+    },
+    "ap_amplitude_mv": {
+        "what": "Canonical AP amplitude (LNMC definition): peak voltage minus threshold "
+                "voltage (the dV/dt-triggered onset). Median across all detected spikes "
+                "in ap_waveform / rest_firing sweeps. Independent of resting-Vm baseline.",
+        "healthy": "60–100 mV for healthy cortical pyramidal cells; < 40 mV is degraded.",
     },
     "ap_amp_overshoot_min_mv": {
         "what": "Worst-case AP overshoot across sweeps — catches sporadic attenuation.",
@@ -140,8 +172,12 @@ METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "healthy": "≈ 0; > 1 = late-sweep runaway oscillation / firing.",
     },
     "test_pulse_edge_overshoot_mv": {
-        "what": "Max peak deviation in 5–10 ms after a test-pulse edge vs the 20–50 ms plateau.",
-        "healthy": "< 5 mV (smooth settling); > 20 mV = capacitive ringing / bad compensation.",
+        "what": "Magnitude of the step-edge voltage transient (5–10 ms post-edge vs 20–50 ms plateau). "
+                "Note: per LNMC experimenter guidance, a SHARP transient is the GOOD signature of "
+                "active Rs compensation; a smooth exponential decay indicates NO compensation. "
+                "So this metric is informational — interpretation depends on whether you expect "
+                "compensation in this protocol. Cross-reference rs_compensation_pct from metadata.",
+        "healthy": "Cohort-dependent. Stable across reps is the real signal; rac_variability_pct quantifies that.",
     },
     "qc_protocol_coverage": {
         "what": "Boolean: NWB carries at least one sweep from each essential family "

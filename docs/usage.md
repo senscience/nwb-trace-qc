@@ -6,6 +6,19 @@ The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the i
 
 ---
 
+## What changed in v0.5.0
+
+LNMC experimenter-guidance additions (see "Parameters to consider while evaluating quality of whole cell, current clamp recordings" — the eCode protocol guidance document). `PIPELINE_VERSION` bumped to `0.5.0` — the v0.4.x cache is invalidated automatically.
+
+- **Spontaneous-hold family split.** The legacy `spontaneous_hold` family is split into two semantically distinct families:
+  - `spontaneous_no_hold` (true Vrest — no holding current): `SponNonHold30`, `SponNoHold30`, `StartNoHold` (default). Drives `vrest_mv`.
+  - `spontaneous_held` (held at a target Vm under Ihld): `SponHold3`, `SponHold30`, `StartHold` (default). Drives the new `held_vm_mv` metric and is the canonical source of `holding_current_pa`.
+  - Legacy `spontaneous_hold` family still works as a mixed-semantics fallback; the pipeline logs once per run noting the cohort should be migrated to the split.
+- **New `ap_amplitude_mv` metric.** Peak − threshold (canonical AP amplitude per LNMC's definition; eFEL's `AP_amplitude` feature). Distinct from `ap_amp_overshoot_mv` (peak above 0 mV) — both are reported. Default rule: `flag_below: 60 mV, fail_below: 40 mV`.
+- **New `rs_compensation_pct` metric.** Read from `IntracellularElectrode.resistance_comp_correction` in the NWB icephys metadata (or a `lab_meta_data` field whose name contains "rs"/"resistance"/"compensation"). Catches cohorts where the experimenter forgot to enable Rs compensation. Default rule: `flag_below: 50, fail_below: 0`.
+- **New `rac_variability_pct` metric.** Coefficient of variation (std/median × 100) of per-Rac Rs estimates. Catches non-monotonic Rs instability that the existing first-vs-last `rs_drift_pct` misses. Default rule: `flag_above: 20, fail_above: 40`.
+- **Reframed `test_pulse_edge_overshoot_mv`.** Per the LNMC PDF: a *sharp* edge transient is the *good* signature of active Rs compensation; a smooth exponential decay indicates no compensation. The default auto rule has been removed — the metric is now informational and the interpretation depends on `rs_compensation_pct`. `rac_variability_pct` covers the cohort-stability check.
+
 ## What changed in v0.4.0
 
 `PIPELINE_VERSION` bumped to `0.4.0` — the v0.3.x metric cache is invalidated automatically (first run will recompute). Three substantive additions:

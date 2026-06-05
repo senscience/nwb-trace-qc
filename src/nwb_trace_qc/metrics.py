@@ -442,6 +442,52 @@ def _test_pulse_edge_overshoot_mv(trace_v: np.ndarray, rate_hz: float,
     return abs(v_edge_extreme - v_plateau) * 1000.0   # V → mV
 
 
+def _read_rs_compensation_pct(nwbfile) -> float:
+    """Read the Rs compensation percentage from the NWB's icephys metadata.
+
+    pynwb's IntracellularElectrode object exposes `resistance_comp_correction`
+    (typically a float 0..1 representing the fraction of Rs compensated, or a
+    percentage 0..100 depending on the lab convention). Returns the value as a
+    percentage (multiplying by 100 if it looks like a fraction), or NaN when
+    no electrode carries the field.
+
+    Some labs put the value in `lab_meta_data` instead — we try that as a
+    fallback by looking for any field whose lowercased name contains 'rs' or
+    'resistance' and that resolves to a number.
+    """
+    try:
+        electrodes = list(getattr(nwbfile, "icephys_electrodes", {}).values())
+    except Exception:
+        electrodes = []
+    for elec in electrodes:
+        val = getattr(elec, "resistance_comp_correction", None)
+        if val is None:
+            continue
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            continue
+        # pynwb sometimes stores this as a 0..1 fraction; normalise to percent
+        return v * 100.0 if 0 <= v <= 1 else v
+    # Fallback: lab_meta_data scan
+    try:
+        lm = getattr(nwbfile, "lab_meta_data", {}) or {}
+        for container in lm.values():
+            for attr in dir(container):
+                if attr.startswith("_"):
+                    continue
+                name_lower = attr.lower()
+                if "rs" in name_lower or "resistance" in name_lower or "compensation" in name_lower:
+                    try:
+                        v = float(getattr(container, attr))
+                        return v * 100.0 if 0 <= v <= 1 else v
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+    except Exception:
+        pass
+    return float("nan")
+
+
 def _provenance_first_last(values_and_names: list[tuple[float, str]]) -> dict[str, Any]:
     """For a metric reduced by first/last/median, record which sweeps contributed."""
     clean = [(v, n) for v, n in values_and_names if not math.isnan(v)]
@@ -492,6 +538,25 @@ def _efel_or_fallback_peak_overshoot_mv(voltage_v: np.ndarray, current_a: np.nda
             if not math.isnan(peak_mv):
                 return float(peak_mv), False
     return float(fallback_fn()), True
+
+
+def _efel_or_fallback_ap_amplitude_mv(voltage_v: np.ndarray, current_a: np.ndarray | None,
+                                         rate_hz: float) -> float:
+    """Median AP amplitude (peak − threshold) across spikes in this sweep, in mV.
+
+    This is the canonical AP amplitude as defined by LNMC experimenter guidance
+    (see docs/metrics_reference.md): the difference between the AP peak voltage
+    and the threshold voltage at which the sodium current activated. Distinct
+    from `ap_amp_overshoot_mv` which measures peak above 0 mV.
+
+    Returns NaN when eFEL refuses or no spikes are detected.
+    """
+    feats = efel_features_for_sweep(voltage_v, current_a, rate_hz,
+                                      features=[EFEL_AP_AMPLITUDE])
+    if feats is None:
+        return float("nan")
+    amps = feats.get(EFEL_AP_AMPLITUDE)
+    return feature_scalar(amps)
 
 
 def _efel_or_fallback_ap_threshold_mv(voltage_v: np.ndarray, current_a: np.ndarray | None,
@@ -661,6 +726,17 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
         "bad_ending_at_sweep": float("nan"),
         "n_sweeps_trimmed": 0,
         "bad_ending_reason": None,
+        # Experimenter-guidance additions (v0.5.0)
+        # Vrest split: true Vrest (no holding current) vs held-Vm under Ihld
+        "held_vm_mv": float("nan"),
+        # AP amplitude defined as peak − threshold (eFEL's AP_amplitude),
+        # distinct from ap_amp_overshoot_mv (peak − 0 mV)
+        "ap_amplitude_mv": float("nan"),
+        # Rs compensation value read from NWB icephys metadata
+        "rs_compensation_pct": float("nan"),
+        # CV of per-Rac Rs estimates × 100 — catches variability that
+        # rs_drift_pct (first vs last) doesn't see
+        "rac_variability_pct": float("nan"),
         # Bookkeeping
         "n_rs_fallback_sweeps": 0,
         "n_efel_fallback_sweeps": 0,
@@ -668,29 +744,39 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
     }
     try:
         with open_nwb(nwb_path) as nwbfile:
+            # Read Rs compensation value from the icephys metadata (v0.5.0)
+            out["rs_compensation_pct"] = _read_rs_compensation_pct(nwbfile)
+
             # All accumulators carry (value, acq_name) pairs so we can record
             # provenance (which sweeps drove first/last/median) for the report.
-            sponhold_vrest: list[tuple[float, str]] = []
-            rs_estimates: list[tuple[float, str]] = []
-            ap_overshoots: list[tuple[float, str]] = []
-            ap_thresholds: list[tuple[float, str]] = []
-            baseline_rms_vals: list[float] = []
-            holding_currents: list[tuple[float, str]] = []
+            # v0.5.0: distinguish no-hold vs held spontaneous traces; legacy
+            # `spontaneous_hold` (single bucket) routes to held_vm for backward
+            # compatibility.
+            vrest_no_hold: list[tuple[float, str, int]] = []      # true Vrest source
+            held_vm_vals: list[tuple[float, str, int]] = []        # held under Ihld
+            sponhold_vrest: list[tuple[float, str, int]] = []      # legacy fallback (mixed)
+            rs_estimates: list[tuple[float, str, int]] = []
+            ap_overshoots: list[tuple[float, str, int]] = []
+            ap_thresholds: list[tuple[float, str, int]] = []
+            ap_amplitudes_pkthr: list[tuple[float, str, int]] = []   # v0.5.0: peak − threshold
+            baseline_rms_vals: list[tuple[float, int]] = []
+            holding_currents: list[tuple[float, str, int]] = []
             iv_pairs: list[tuple[float, float]] = []
             present_families: set[str] = set()
             n_total = 0; n_clip = 0; n_nan = 0
             # Visual-defect accumulators
-            decay_residuals: list[float] = []
-            vm_drift_slopes: list[float] = []
-            failure_fractions: list[float] = []
-            ap_amp_cvs: list[float] = []
-            late_instabilities: list[float] = []
-            edge_overshoots: list[float] = []
+            decay_residuals: list[tuple[float, int]] = []
+            vm_drift_slopes: list[tuple[float, int]] = []
+            failure_fractions: list[tuple[float, int]] = []
+            ap_amp_cvs: list[tuple[float, int]] = []
+            late_instabilities: list[tuple[float, int]] = []
+            edge_overshoots: list[tuple[float, int]] = []
             # Per-AP amplitudes for attenuation-fraction reduction
-            per_ap_amplitudes: list[float] = []
+            per_ap_amplitudes: list[tuple[float, int]] = []
             # Bookkeeping
             rs_fallback_used = 0
             efel_fallback_used = 0
+            legacy_hold_used = False
 
             for sweep_idx, (name, obj) in enumerate(_iter_current_clamp_acqs(nwbfile)):
                 n_total += 1
@@ -714,7 +800,7 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 if not math.isnan(ih):
                     holding_currents.append((ih, name, sweep_idx))
 
-                if family == "spontaneous_hold":
+                if family in ("spontaneous_hold", "spontaneous_no_hold", "spontaneous_held"):
                     # eFEL voltage_base on the steady-state baseline; falls back
                     # to our last-500ms median when eFEL is absent / refuses.
                     if use_efel:
@@ -723,9 +809,18 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                             fallback_fn=lambda: _median_last_seconds(trace, rate, 0.5))
                     else:
                         vrest_v, used_fb = _median_last_seconds(trace, rate, 0.5), False
-                    sponhold_vrest.append((vrest_v, name, sweep_idx))
                     if used_fb:
                         efel_fallback_used += 1
+                    # Route to the right accumulator per the new (v0.5.0) split.
+                    # Legacy `spontaneous_hold` (single bucket) feeds the legacy
+                    # accumulator which falls into held_vm at reduction time.
+                    if family == "spontaneous_no_hold":
+                        vrest_no_hold.append((vrest_v, name, sweep_idx))
+                    elif family == "spontaneous_held":
+                        held_vm_vals.append((vrest_v, name, sweep_idx))
+                    else:
+                        sponhold_vrest.append((vrest_v, name, sweep_idx))
+                        legacy_hold_used = True
                     baseline_rms_vals.append((_rms(trace) * 1000.0, sweep_idx))
                     s = _vm_drift_slope_mv_per_s(trace, rate)
                     if not math.isnan(s):
@@ -763,6 +858,11 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                         th = _ap_threshold_mv(trace, rate)
                     if not math.isnan(th):
                         ap_thresholds.append((th, name, sweep_idx))
+                    # v0.5.0: AP_amplitude = peak − threshold (canonical AP amplitude)
+                    if use_efel:
+                        amp_pkthr = _efel_or_fallback_ap_amplitude_mv(trace, stim_a, rate)
+                        if not math.isnan(amp_pkthr):
+                            ap_amplitudes_pkthr.append((amp_pkthr, name, sweep_idx))
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
                         failure_fractions.append((f, sweep_idx))
@@ -789,6 +889,11 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                         th = _ap_threshold_mv(trace, rate)
                     if not math.isnan(th):
                         ap_thresholds.append((th, name, sweep_idx))
+                    # v0.5.0: AP_amplitude = peak − threshold
+                    if use_efel:
+                        amp_pkthr = _efel_or_fallback_ap_amplitude_mv(trace, stim_a, rate)
+                        if not math.isnan(amp_pkthr):
+                            ap_amplitudes_pkthr.append((amp_pkthr, name, sweep_idx))
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
                         failure_fractions.append((f, sweep_idx))
@@ -817,9 +922,10 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
             out["n_efel_fallback_sweeps"] = efel_fallback_used
 
             # ── Bad-ending detection + auto-trim (v0.4.0) ───────────────
-            # Convert volts → mV for the AP overshoot stream so the detector's
-            # mV-scaled thresholds match.
-            vrest_seq = [(v, idx) for v, _name, idx in sponhold_vrest]
+            # Pull Vrest signal from whichever family populated it (preference
+            # order: no_hold > held > legacy lumped). Same for Rs and overshoot.
+            vrest_combined = vrest_no_hold or held_vm_vals or sponhold_vrest
+            vrest_seq = [(v, idx) for v, _name, idx in vrest_combined]
             rs_seq    = [(v, idx) for v, _name, idx in rs_estimates]
             ov_seq    = [(v, idx) for v, _name, idx in ap_overshoots]
             cutoff_idx, reason = _detect_bad_ending(vrest_seq, rs_seq, ov_seq, n_total) \
@@ -831,10 +937,13 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 # Filter every per-sweep accumulator to keep only entries strictly
                 # before the cutoff. Items here are 3-tuples (..., sweep_idx) or
                 # 2-tuples (value, sweep_idx) — _filter_before handles both.
+                vrest_no_hold = _filter_before(vrest_no_hold, cutoff_idx)
+                held_vm_vals = _filter_before(held_vm_vals, cutoff_idx)
                 sponhold_vrest = _filter_before(sponhold_vrest, cutoff_idx)
                 rs_estimates = _filter_before(rs_estimates, cutoff_idx)
                 ap_overshoots = _filter_before(ap_overshoots, cutoff_idx)
                 ap_thresholds = _filter_before(ap_thresholds, cutoff_idx)
+                ap_amplitudes_pkthr = _filter_before(ap_amplitudes_pkthr, cutoff_idx)
                 holding_currents = _filter_before(holding_currents, cutoff_idx)
                 baseline_rms_vals = _filter_before(baseline_rms_vals, cutoff_idx)
                 vm_drift_slopes = _filter_before(vm_drift_slopes, cutoff_idx)
@@ -845,18 +954,37 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 late_instabilities = _filter_before(late_instabilities, cutoff_idx)
                 per_ap_amplitudes = _filter_before(per_ap_amplitudes, cutoff_idx)
 
-            # Vrest + session drift
-            vrest_vals = [item[0] for item in sponhold_vrest if not math.isnan(item[0])]
+            # Vrest source priority (v0.5.0): spontaneous_no_hold > spontaneous_held
+            # > legacy spontaneous_hold. vrest_mv is the canonical TRUE resting
+            # potential; held_vm_mv is a separate metric for the held membrane
+            # potential under Ihld.
+            vrest_source_stream = vrest_no_hold if vrest_no_hold else (
+                held_vm_vals if held_vm_vals else sponhold_vrest
+            )
+            if vrest_source_stream is sponhold_vrest and legacy_hold_used:
+                log.info(
+                    "vrest_mv sourced from legacy `spontaneous_hold` family "
+                    "(no `spontaneous_no_hold` or `spontaneous_held` mapped). "
+                    "Update project YAML's stimulus_protocols to use the v0.5.0 split."
+                )
+            vrest_vals = [item[0] for item in vrest_source_stream if not math.isnan(item[0])]
             if vrest_vals:
                 out["vrest_mv"] = float(np.median(vrest_vals) * 1000.0)
                 if len(vrest_vals) >= 2:
                     out["vrest_drift_mv"] = float((vrest_vals[-1] - vrest_vals[0]) * 1000.0)
-                a, b = _halve_session([(item[0], item[1]) for item in sponhold_vrest])
+                a, b = _halve_session([(item[0], item[1]) for item in vrest_source_stream])
                 if a and b:
                     out["vrest_session_drift_mv"] = float((np.median(b) - np.median(a)) * 1000.0)
                 out["vrest_mv_provenance"] = json.dumps(
-                    _provenance_first_last([(item[0], item[1]) for item in sponhold_vrest])
+                    _provenance_first_last([(item[0], item[1]) for item in vrest_source_stream])
                 )
+
+            # Held-Vm: only the held family or legacy fallback contributes; never
+            # the no-hold family (semantically a different measurement).
+            held_stream = held_vm_vals if held_vm_vals else sponhold_vrest
+            held_vals = [item[0] for item in held_stream if not math.isnan(item[0])]
+            if held_vals:
+                out["held_vm_mv"] = float(np.median(held_vals) * 1000.0)
 
             if baseline_rms_vals:
                 out["baseline_rms_mv"] = float(np.median([item[0] for item in baseline_rms_vals]))
@@ -878,6 +1006,16 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 out["rs_mohm_provenance"] = json.dumps(
                     _provenance_first_last([(item[0], item[1]) for item in rs_estimates])
                 )
+                # v0.5.0: variability of Rac across reps — separate from drift.
+                # CV (std/median) × 100 catches non-monotonic instability that
+                # rs_drift_pct (first vs last) misses.
+                rs_clean_vals = np.array([item[0] for item in rs_clean], dtype=np.float64)
+                if len(rs_clean_vals) >= 3:
+                    med = float(np.median(rs_clean_vals))
+                    if med > 0:
+                        out["rac_variability_pct"] = float(
+                            np.std(rs_clean_vals) / med * 100.0
+                        )
 
             # Rin
             if iv_pairs:
@@ -913,6 +1051,12 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 th_clean = [item[0] for item in ap_thresholds if not math.isnan(item[0])]
                 out["ap_threshold_drift_mv"] = float(th_clean[-1] - th_clean[0])
 
+            # v0.5.0: AP_amplitude (peak − threshold) — canonical AP amplitude
+            # per LNMC experimenter guidance, distinct from ap_amp_overshoot_mv.
+            amp_pkthr_vals = [item[0] for item in ap_amplitudes_pkthr if not math.isnan(item[0])]
+            if amp_pkthr_vals:
+                out["ap_amplitude_mv"] = float(np.median(amp_pkthr_vals))
+
             # Visual-defect reductions
             if decay_residuals:
                 out["rac_decay_residual_rel"] = float(np.median([item[0] for item in decay_residuals]))
@@ -927,9 +1071,15 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
             if edge_overshoots:
                 out["test_pulse_edge_overshoot_mv"] = float(np.max([item[0] for item in edge_overshoots]))
 
-            # Coverage
-            essential = {"spontaneous_hold", "test_pulse", "ap_waveform"}
-            out["qc_protocol_coverage"] = essential.issubset(present_families)
+            # Coverage. v0.5.0: spontaneous_no_hold / spontaneous_held / legacy
+            # spontaneous_hold all satisfy the "spontaneous" essential.
+            spontaneous_present = bool(
+                present_families & {"spontaneous_no_hold", "spontaneous_held", "spontaneous_hold"}
+            )
+            essential = {"test_pulse", "ap_waveform"}
+            out["qc_protocol_coverage"] = (
+                spontaneous_present and essential.issubset(present_families)
+            )
     except Exception as e:  # noqa: BLE001
         out["compute_error"] = f"{type(e).__name__}: {e}"
     return out

@@ -18,9 +18,11 @@ from nwb_trace_qc.families import METRIC_DESCRIPTIONS, METRIC_TO_FAMILY
 # Each entry: (eFEL feature name, "used directly" or "derived")
 # Mirrors the table in metrics.py's _efel_or_fallback_* helpers.
 METRIC_TO_EFEL: dict[str, tuple[str, str]] = {
-    "vrest_mv":                ("voltage_base", "used directly"),
+    "vrest_mv":                ("voltage_base", "used directly (on spontaneous_no_hold sweeps)"),
+    "held_vm_mv":              ("voltage_base", "used directly (on spontaneous_held sweeps)"),
     "ap_amp_overshoot_mv":     ("AP_amplitude_from_voltagebase", "derived (vbase + median(AP_amp_from_vbase))"),
     "ap_amp_overshoot_min_mv": ("AP_amplitude_from_voltagebase", "derived (min across sweeps)"),
+    "ap_amplitude_mv":         ("AP_amplitude", "used directly (canonical: peak − threshold)"),
     "ap_threshold_drift_mv":   ("AP_begin_voltage", "used directly"),
     "ap_amp_cv":               ("AP_amplitude", "derived (std/|mean| over per-spike amplitudes)"),
     "ap_failure_fraction":     ("Spikecount", "derived (dV/dt initiations vs. Spikecount)"),
@@ -44,7 +46,11 @@ CUSTOM_ALGORITHMS: dict[str, str] = {
     "test_pulse_edge_overshoot_mv": "Peak |dV| in 0–10 ms after a test-pulse edge minus the 20–50 ms plateau.",
     "ap_overshoot_session_drift_mv": "Median AP overshoot (2nd half) − median (1st half).",
     "ap_amp_attenuation_frac": "Fraction of detected APs whose individual overshoot < 15 mV.",
-    "qc_protocol_coverage": "Boolean — does the NWB carry ≥1 sweep in each essential family.",
+    "rs_compensation_pct": "Read from the NWB's IntracellularElectrode.resistance_comp_correction "
+                            "(or a lab_meta_data 'Rs' field). 0..1 fractions are normalised to 0..100%.",
+    "rac_variability_pct": "CV (std/median × 100) of per-Rac Rs estimates across the test_pulse sweeps; "
+                            "needs ≥3 Rac sweeps. Catches non-monotonic Rs instability that rs_drift_pct misses.",
+    "qc_protocol_coverage": "Boolean — does the NWB carry ≥1 sweep in each essential family (spontaneous + test_pulse + ap_waveform).",
     "n_sweeps_total": "Count of voltage acquisitions iterated by the metric pass.",
     "n_sweeps_clipped": "Sweeps that touched the voltage rails (±150 / +80 mV) for ≥1 ms.",
     "n_sweeps_nan": "Sweeps containing NaN samples.",
