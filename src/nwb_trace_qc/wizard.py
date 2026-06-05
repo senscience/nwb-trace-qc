@@ -200,43 +200,65 @@ def _interactive_map_unmapped(output_path: Path) -> bool:
     families = cfg.get("stimulus_protocols") or {}
 
     click.secho(
-        f"\n  Interactive mapping: {len(unmapped)} unmapped token(s). For each "
-        f"token, choose a family number or 0 to leave unmapped.",
+        f"\n  {len(unmapped)} unmapped token(s). Pick an action:",
         fg="cyan", bold=True)
-    click.secho("    Tip: any letter that isn't a number cancels mapping for that token.",
-                dim=True)
+    click.secho(
+        "    [w] walk through each (one prompt per token, heuristic-suggested default)\n"
+        "    [a] accept all heuristic-suggested mappings in one keystroke\n"
+        "    [c] cancel (leave YAML unchanged)\n",
+        dim=True)
+    top_choice = click.prompt("  action", default="w", show_default=True).strip().lower()[:1]
+
+    if top_choice == "c":
+        click.secho("  cancelled — YAML unchanged.", fg="red")
+        return False
 
     assigned: dict[str, str] = {}
-    for token, n_sweeps in unmapped:
-        guess = _guess_family(token)
-        guess_idx = (_FAMILIES_FOR_MAPPING.index(guess) + 1) if guess in _FAMILIES_FOR_MAPPING else 0
-        click.echo("")
-        click.secho(f"  {token}", bold=True, nl=False)
-        click.secho(f"  ({n_sweeps} sweeps)", dim=True)
-        for i, fam in enumerate(_FAMILIES_FOR_MAPPING, start=1):
-            tag = "  ← suggested" if guess == fam else ""
-            click.echo(f"    {i}) {fam}{tag}")
-        click.echo(f"    0) skip — leave as unmapped")
-        default_str = str(guess_idx) if guess_idx else "0"
-        raw = click.prompt(f"  assign {token}",
-                            default=default_str, show_default=True).strip()
-        try:
-            choice = int(raw)
-        except ValueError:
-            click.secho(f"    cancelled — {token} remains unmapped.", dim=True)
-            continue
-        if not (0 <= choice <= len(_FAMILIES_FOR_MAPPING)):
-            click.secho(f"    out of range — {token} remains unmapped.", dim=True)
-            continue
-        if choice == 0:
-            continue
-        fam = _FAMILIES_FOR_MAPPING[choice - 1]
-        # Lazily create the family list only when we're actually populating it,
-        # so untouched families don't appear as empty arrays in the saved YAML.
-        families.setdefault(fam, [])
-        if token not in families[fam]:
-            families[fam].append(token)
-        assigned[token] = fam
+
+    if top_choice == "a":
+        # Bulk-assign every heuristic-derived guess; tokens with no guess stay unmapped.
+        for token, _n_sweeps in unmapped:
+            fam = _guess_family(token)
+            if fam not in _FAMILIES_FOR_MAPPING:
+                continue
+            families.setdefault(fam, [])
+            if token not in families[fam]:
+                families[fam].append(token)
+            assigned[token] = fam
+    else:
+        # Per-token walk (default [w])
+        click.secho("    Tip: any letter that isn't a number cancels mapping for that token.",
+                    dim=True)
+        for token, n_sweeps in unmapped:
+            guess = _guess_family(token)
+            guess_idx = (_FAMILIES_FOR_MAPPING.index(guess) + 1) if guess in _FAMILIES_FOR_MAPPING else 0
+            click.echo("")
+            click.secho(f"  {token}", bold=True, nl=False)
+            click.secho(f"  ({n_sweeps} sweeps)", dim=True)
+            for i, fam in enumerate(_FAMILIES_FOR_MAPPING, start=1):
+                tag = "  ← suggested" if guess == fam else ""
+                click.echo(f"    {i}) {fam}{tag}")
+            click.echo(f"    0) skip — leave as unmapped")
+            default_str = str(guess_idx) if guess_idx else "0"
+            raw = click.prompt(f"  assign {token}",
+                                default=default_str, show_default=True).strip()
+            try:
+                choice = int(raw)
+            except ValueError:
+                click.secho(f"    cancelled — {token} remains unmapped.", dim=True)
+                continue
+            if not (0 <= choice <= len(_FAMILIES_FOR_MAPPING)):
+                click.secho(f"    out of range — {token} remains unmapped.", dim=True)
+                continue
+            if choice == 0:
+                continue
+            fam = _FAMILIES_FOR_MAPPING[choice - 1]
+            # Lazily create the family list only when we're actually populating it,
+            # so untouched families don't appear as empty arrays in the saved YAML.
+            families.setdefault(fam, [])
+            if token not in families[fam]:
+                families[fam].append(token)
+            assigned[token] = fam
 
     if not assigned:
         click.secho("\n  no tokens were mapped — YAML unchanged.", dim=True)
@@ -298,7 +320,7 @@ def _trim_unmapped_block(header_lines: list[str], assigned: dict[str, str],
 
 def _stage_inspect(root: Path) -> bool:
     from .inspect import inspect_root, render_terminal
-    _stage_banner(1, 5, "Inspect")
+    _stage_banner(1, 6, "Inspect")
     click.echo(render_terminal(inspect_root(root)))
     _hr()
     ans = _prompt_choice("continue?", ["yes", "quit"], default="y")
@@ -316,7 +338,7 @@ def _stage_propose(root: Path, output_path: Path,
 
     while True:
         click.secho("═" * 72, dim=True)
-        click.secho(f"STAGE 2/5 · Propose config", bold=True, fg="cyan", nl=False)
+        click.secho(f"STAGE 2/6 · Propose config", bold=True, fg="cyan", nl=False)
         click.secho(f"  →  {output_path}", dim=True)
         _hr()
         text = output_path.read_text()
@@ -348,6 +370,48 @@ def _stage_propose(root: Path, output_path: Path,
             click.secho("  (no changes saved)", dim=True)
 
 
+def _stage_review_thresholds(config_path: Path) -> str:
+    """Stage 3/6: review (and optionally edit) the thresholds YAML before the
+    first metric-compute run. No cohort data exists yet, so this is purely
+    editorial — same UX as the propose-config stage, but pointed at the
+    thresholds file referenced by the project YAML.
+
+    Returns 'a' (accept), 'q' (quit). The 'e'-loop is internal — we don't return
+    control to the caller until the user picks accept or quit.
+    """
+    cfg = load_config(config_path)
+    thresholds_file = cfg.thresholds_file
+    if thresholds_file is None or not thresholds_file.exists():
+        click.secho(
+            f"  (no thresholds_file configured for this project — skipping review)",
+            dim=True,
+        )
+        return "a"
+
+    while True:
+        click.secho("═" * 72, dim=True)
+        click.secho(f"STAGE 3/6 · Review thresholds", bold=True, fg="cyan", nl=False)
+        click.secho(f"  →  {thresholds_file}", dim=True)
+        _hr()
+        click.echo(thresholds_file.read_text())
+        _hr()
+        click.secho(
+            "  Bundled defaults shown above. [e]dit now to set initial rules\n"
+            "  before the first run — after the run you can also use\n"
+            "  [t]une-thresholds in the outcome menu (cohort-percentile aware),\n"
+            "  or `nwb-qc tune` standalone.",
+            dim=True)
+        ans = _prompt_choice("review", ["accept", "edit", "quit"], default="a")
+        if ans == "a":
+            return "a"
+        if ans == "q":
+            return "q"
+        # edit
+        edited = click.edit(filename=str(thresholds_file))
+        if edited is None:
+            click.secho("  (no changes saved)", dim=True)
+
+
 def _stage_dryrun(config_path: Path) -> str:
     """Run the manifest-build dry-run and print the same block as `list-cells`.
 
@@ -356,7 +420,7 @@ def _stage_dryrun(config_path: Path) -> str:
     cfg = load_config(config_path)
     manifest = build_manifest(cfg)
     uniq = unique_nwbs(manifest)
-    _stage_banner(3, 5, "Dry-run")
+    _stage_banner(4, 6, "Dry-run")
     click.secho(f"Project: ", nl=False); click.secho(cfg.project_name, bold=True)
     click.echo(f"Sources: {len(cfg.nwb_sources)}")
     for s in cfg.nwb_sources:
@@ -388,7 +452,7 @@ def _stage_run(config_path: Path, *, with_vision: bool | None,
     cfg = load_config(config_path)
     if with_vision is not None:
         cfg.vision_judge.enabled = with_vision
-    _stage_banner(4, 5, "Run")
+    _stage_banner(5, 6, "Run")
     callback, _ = _make_progress_callback()
     try:
         return pipeline_run(cfg, progress_callback=callback,
@@ -489,7 +553,7 @@ def _adopt_suggested_thresholds_and_rerun(config_path: Path, suggested_path: str
 
 def _stage_outcome(result: dict, *, with_vision: bool | None,
                     max_cost_usd: float | None) -> None:
-    _stage_banner(5, 5, "Outcome")
+    _stage_banner(6, 6, "Outcome")
     n_pass = result.get('n_pass', 0)
     n_flag = result.get('n_flag', 0)
     n_fail = result.get('n_fail', 0)
@@ -648,6 +712,10 @@ def run_wizard(root: Path, *, output_path: Path, name: str | None = None,
                                   name=name, guess_tables=guess_tables)
         if accepted is None:
             click.secho("aborted at propose.", fg="red")
+            return 1
+        thr_choice = _stage_review_thresholds(accepted)
+        if thr_choice == "q":
+            click.secho("aborted at review-thresholds.", fg="red")
             return 1
         choice = _stage_dryrun(accepted)
         if choice == "q":
