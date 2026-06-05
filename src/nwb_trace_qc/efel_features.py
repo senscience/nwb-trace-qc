@@ -19,11 +19,20 @@ We pass voltage in mV (eFEL's default unit) and times in ms.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+# Minimum pre-stim window (seconds) we promise eFEL — voltage_base computes
+# its baseline over the LAST 10% of the pre-stim window, so we need enough
+# room before stim_start for the feature to have data to average.
+_MIN_PRE_STIM_S = 0.020   # 20 ms
+
+# Minimum stim window (seconds) — guards against degenerate (start ≈ end) cases.
+_MIN_STIM_LEN_S = 0.010   # 10 ms
 
 
 # Common feature names sourced from eFEL — kept here so call sites can refer
@@ -40,18 +49,35 @@ EFEL_MEAN_FREQUENCY = "mean_frequency"
 def _build_trace_dict(voltage_v: np.ndarray, rate_hz: float,
                        stim_start_ms: float | None, stim_end_ms: float | None,
                        label: str = "sweep") -> dict[str, Any]:
-    """Build the input dict eFEL's get_feature_values expects."""
+    """Build the input dict eFEL's get_feature_values expects.
+
+    Enforces a minimum pre-stim window: voltage_base computes its baseline
+    over the last 10% of (0, stim_start), so stim_start must be far enough
+    in for that 10% to span at least a handful of samples. We clamp to 20 ms.
+    """
     n = len(voltage_v)
     times_ms = (np.arange(n, dtype=np.float64) / rate_hz) * 1000.0
+    total_ms = float(times_ms[-1]) if n > 0 else 0.0
     voltage_mv = voltage_v.astype(np.float64) * 1000.0
 
-    # Default the stim window to "the middle 50%" when no paired stim told us
-    # otherwise — eFEL needs *some* window to be sensible for stim-relative
-    # features. voltage_base is computed on the pre-stim baseline.
+    min_pre_ms = _MIN_PRE_STIM_S * 1000.0
+    min_stim_len_ms = _MIN_STIM_LEN_S * 1000.0
+
+    # Sensible defaults when no paired stim told us where the stimulus is:
+    # treat the first quarter of the trace as pre-stim baseline (gives eFEL
+    # voltage_base ~10% of trace length to compute over) and the rest as stim.
     if stim_start_ms is None:
-        stim_start_ms = float(times_ms[n // 4])
+        stim_start_ms = max(min_pre_ms, total_ms * 0.25)
     if stim_end_ms is None:
-        stim_end_ms = float(times_ms[(3 * n) // 4])
+        stim_end_ms = max(stim_start_ms + min_stim_len_ms, total_ms * 0.75)
+
+    # Clamp: stim_start needs enough lead-in for voltage_base, and
+    # stim_end must follow stim_start by at least the minimum stim length.
+    stim_start_ms = max(stim_start_ms, min_pre_ms)
+    if stim_start_ms > total_ms - min_stim_len_ms:
+        stim_start_ms = max(min_pre_ms, total_ms - min_stim_len_ms)
+    stim_end_ms = max(stim_end_ms, stim_start_ms + min_stim_len_ms)
+    stim_end_ms = min(stim_end_ms, total_ms)
 
     # eFEL trace dicts use 4 numeric keys: T (ms), V (mV), stim_start, stim_end.
     # Don't include 'label' or other string keys — eFEL >=5 iterates every key
@@ -85,7 +111,13 @@ def _step_window_ms(current_a: np.ndarray | None, rate_hz: float) -> tuple[float
     idx = np.where(above)[0]
     start_idx = int(idx[0])
     end_idx = int(idx[-1])
-    return (start_idx / rate_hz) * 1000.0, (end_idx / rate_hz) * 1000.0
+    start_ms = (start_idx / rate_hz) * 1000.0
+    end_ms = (end_idx / rate_hz) * 1000.0
+    # Don't return a stim_start that leaves no pre-stim window — _build_trace_dict
+    # will clamp it anyway, but signal the caller more honestly here.
+    if start_ms < _MIN_PRE_STIM_S * 1000.0:
+        return None, None
+    return start_ms, end_ms
 
 
 def efel_features_for_sweep(
@@ -119,7 +151,12 @@ def efel_features_for_sweep(
         efel.reset()
         # eFEL 5+ exposes get_feature_values; older versions only getFeatureValues
         getter = getattr(efel, "get_feature_values", None) or efel.getFeatureValues
-        results = getter([trace], features)
+        # eFEL emits a RuntimeWarning per feature it can't compute (e.g. when
+        # there's no spike in a quiet sweep). We treat None results as silent
+        # fallbacks — the warning chatter would just pollute the progress line.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning, module=r".*efel.*")
+            results = getter([trace], features)
     except Exception as e:  # noqa: BLE001
         log.debug("efel call failed for %s: %s", label, e)
         return None
