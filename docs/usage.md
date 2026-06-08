@@ -342,7 +342,16 @@ curl -o sweep_005.png 'http://127.0.0.1:8765/api/thumb/<cell_id>/5?w=220&h=100'
 curl http://127.0.0.1:8765/api/families
 ```
 
-**Flags:** `--port N` to change the port, `--no-browser` to skip auto-opening.
+**Flags:** `--port N` to change the port, `--no-browser` to skip auto-opening, `--host 0.0.0.0` to make the viewer reachable from other machines on your network (see *Sharing the viewer over a network* below).
+
+**Sharing the viewer over a network.** The default `--host 127.0.0.1` only accepts connections from your local machine. To let collaborators on the same lab network point their browser at *your* serving machine — no install on their side — bind to `0.0.0.0` and tell them the URL:
+
+```bash
+nwb-qc serve --config configs/mydata_project.yaml --host 0.0.0.0 --port 8765
+# Collaborators open  http://<your-hostname>:8765/  in any browser.
+```
+
+If you plan to share via the network, also set `viewer_url: http://<your-hostname>:8765` in your project YAML **before** `nwb-qc run`, so the static report's "Inspect all sweeps →" links target the network address rather than the default `127.0.0.1`. Without that, collaborators clicking the deep-link will hit the start-command banner because their machine has nothing on port 8765.
 
 **Check before moving on:** flagged cells' sweeps visually agree with the rules' verdict. Where they disagree, that's input to Step 6.
 
@@ -512,7 +521,7 @@ nwb-qc run --config mydata_project.yaml && nwb-qc serve --config mydata_project.
 | `nwb-qc calibrate --config <file>` | Suggest cohort-specific thresholds from cached metric distributions. Writes a `*_thresholds_suggested.yaml` you can opt into + a `cohort_stats.json` consumed by the next `run` to add percentile context to triggered chips. |
 | `nwb-qc tune --config <file> [--no-rerun] [--only-failing]` | Interactive threshold-tuning walk. Top-of-walk options: `[w]` per-rule, `[a]` accept-all-suggested, `[c]` cancel. After the walk previews new verdict counts and (optionally) re-runs the pipeline — cache-fast since metrics don't recompute. |
 | `nwb-qc inventory-metrics --config <file> [--n-samples N]` | Walk N (default 5) NWBs and report which canonical QC metrics they pre-compute internally vs. which `nwb-trace-qc` will compute. Writes `<output_dir>/metric_inventory.md`. See also `docs/metrics_reference.md` for the per-metric algorithm reference. |
-| `nwb-qc serve --config <file> [--port N] [--no-browser]` | Interactive trace viewer — restricted to `flag` cells only; pass/fail rows stay in `qc_report.csv`. |
+| `nwb-qc serve --config <file> [--host H] [--port N] [--no-browser]` | Interactive trace viewer for non-pass cells. `--host 0.0.0.0` makes the server reachable from other machines on the network (one person serves, others browse — no install needed on their side). |
 | `nwb-qc -v <subcmd>` | DEBUG-level logging on stderr. |
 | `nwb-qc --version` | Print the package version. |
 
