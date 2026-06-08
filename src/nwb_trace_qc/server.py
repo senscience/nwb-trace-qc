@@ -24,6 +24,7 @@ import math
 import threading
 import webbrowser
 from collections import OrderedDict
+from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,7 +44,7 @@ from .config import ProjectConfig
 from .families import DEFAULT_CRITICAL_METRICS, METRIC_TO_FAMILY, PSEUDO_METRIC_LABELS
 from .metrics import compute_metrics
 from .nwb_io import is_zarr, nwb_sha256, open_nwb
-from .overrides import upsert_trim_override
+from .overrides import delete_override, upsert_override, upsert_trim_override
 from .stimuli import StimulusFamilyMap
 from .thresholds import (
     evaluate, load_thresholds_with_overrides, save_threshold_overrides,
@@ -67,6 +68,8 @@ _cfg: ProjectConfig | None = None
 _thresholds_base_path: Path | None = None
 _threshold_overrides_path: Path | None = None
 _trim_overrides_path: Path | None = None
+_overrides_path: Path | None = None     # v0.8.0 — qc_overrides.csv (curator decisions)
+_curator: str = ""                       # v0.8.0 — default reviewer from cfg.curator
 _critical_metrics: set[str] = set()
 
 
@@ -304,6 +307,48 @@ def _reevaluate_all_cells() -> list[dict[str, Any]]:
         if not row.get("override_verdict"):
             row["final_verdict"] = verdict
         row["ephys_qc_score"] = _ephys_qc_score(row, _critical_metrics)
+    return _viewer_cells
+
+
+def _reapply_overrides_to_cells() -> list[dict[str, Any]]:
+    """Re-read qc_overrides.csv and update the in-memory cell list so
+    `final_verdict` + `override_*` columns reflect the latest curator
+    decisions. Returns the refreshed list (mirrors `_reevaluate_all_cells`).
+    """
+    if _overrides_path is None:
+        return _viewer_cells
+    from .overrides import load_overrides
+    ov = load_overrides(_overrides_path)
+    by_cell: dict[str, dict[str, str]] = {}
+    if not ov.empty:
+        for r in ov.itertuples(index=False):
+            cid = str(r.cell_id).strip()
+            v = str(r.override_verdict).strip()
+            if cid and v:
+                by_cell[cid] = {
+                    "override_verdict": v,
+                    "override_note": str(getattr(r, "note", "") or ""),
+                    "override_reviewer": str(getattr(r, "reviewer", "") or ""),
+                    "override_date": str(getattr(r, "date", "") or ""),
+                }
+    for row in _viewer_cells:
+        cid = row.get("cell_id")
+        ov_row = by_cell.get(cid)
+        if ov_row:
+            row["override_verdict"] = ov_row["override_verdict"]
+            row["override_note"] = ov_row["override_note"]
+            row["override_reviewer"] = ov_row["override_reviewer"]
+            row["override_date"] = ov_row["override_date"]
+            row["final_verdict"] = ov_row["override_verdict"]
+        else:
+            # Clear any previous override state so a deleted row reverts to
+            # computed_verdict.
+            row.pop("override_verdict", None)
+            row.pop("override_note", None)
+            row.pop("override_reviewer", None)
+            row.pop("override_date", None)
+            if row.get("computed_verdict"):
+                row["final_verdict"] = row["computed_verdict"]
     return _viewer_cells
 
 
@@ -585,6 +630,49 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, metrics)
             return
 
+        if path == "/api/curation":
+            # v0.8.0 — per-cell verdict decision from the curator UI.
+            # Body: {cell_id, verdict, note?, curator?}.
+            #   verdict ∈ {pass, flag, fail}  ⇒ upsert the row
+            #   verdict == ""                 ⇒ delete the override row
+            body = self._read_json_body()
+            cell_id = str(body.get("cell_id", "")).strip()
+            verdict = str(body.get("verdict", "")).strip().lower()
+            if not cell_id:
+                raise ValueError("body.cell_id required")
+            if cell_id not in _cell_sha and cell_id not in _manifest_lookup:
+                raise FileNotFoundError(f"unknown cell_id: {cell_id}")
+            if _overrides_path is None:
+                raise FileNotFoundError("overrides_path not configured")
+            if verdict and verdict not in {"pass", "flag", "fail"}:
+                raise ValueError(f"verdict must be pass/flag/fail or empty, got {verdict!r}")
+            reviewer = str(body.get("curator", "") or _curator).strip()
+            note = str(body.get("note", "")).strip()
+            today = date.today().isoformat()
+            if verdict == "":
+                delete_override(_overrides_path, cell_id=cell_id)
+                action = "cleared"
+            else:
+                upsert_override(
+                    _overrides_path, cell_id=cell_id,
+                    override_verdict=verdict, note=note,
+                    reviewer=reviewer, date=today,
+                )
+                action = "saved"
+            # Re-apply overrides to the in-memory cell list so the cell-list
+            # verdict chip flips immediately.
+            refreshed = _reapply_overrides_to_cells()
+            self._send_json(HTTPStatus.OK, {
+                "action": action,
+                "cell_id": cell_id,
+                "verdict": verdict,
+                "reviewer": reviewer,
+                "date": today,
+                "saved_to": str(_overrides_path),
+                "cells": refreshed,
+            })
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "no POST route", "path": path})
 
     def _route(self):
@@ -614,6 +702,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "n_total": _total_cells,
                 "cells": _viewer_cells,
             })
+            return
+
+        if path == "/api/curator":
+            # GET — returns the configured curator name (empty string if not set).
+            # The viewer falls back to a localStorage prompt when this is empty.
+            self._send_json(HTTPStatus.OK, {"curator": _curator})
             return
 
         if path == "/api/thresholds":
@@ -704,7 +798,7 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     global _manifest_lookup, _cell_sha, _report_path, _template_html, _project_name, _family_map
     global _viewer_cells, _total_cells, _thumbnails_dir, _thumb_disk_cache_enabled
     global _cfg, _thresholds_base_path, _threshold_overrides_path, _trim_overrides_path
-    global _critical_metrics
+    global _overrides_path, _curator, _critical_metrics
     if not cfg.manifest_path or not cfg.manifest_path.exists():
         raise FileNotFoundError(
             f"manifest not found at {cfg.manifest_path}; run `nwb-qc run --config <yaml>` first")
@@ -724,6 +818,8 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     _thresholds_base_path = cfg.thresholds_file
     _threshold_overrides_path = cfg.threshold_overrides_file
     _trim_overrides_path = cfg.trim_overrides_file
+    _overrides_path = cfg.overrides_path
+    _curator = (cfg.curator or "").strip()
     _critical_metrics = (set(cfg.critical_metrics) if cfg.critical_metrics
                           else set(DEFAULT_CRITICAL_METRICS))
     server = ThreadingHTTPServer((host, port), _Handler)

@@ -327,6 +327,46 @@ def _stage_inspect(root: Path) -> bool:
     return ans == "y"
 
 
+def _prompt_curator_into_yaml(config_path: Path) -> None:
+    """One-line prompt for the curator name. If the YAML already has a non-empty
+    `curator:`, skip. If the user enters a value, splice a `curator: <name>` line
+    into the YAML so subsequent `nwb-qc serve` sessions stamp it onto decisions
+    automatically. Empty answer ⇒ leave the YAML untouched (viewer prompts later).
+    """
+    try:
+        import yaml as _yaml
+        raw = _yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return
+    if isinstance(raw, dict) and str(raw.get("curator", "")).strip():
+        return  # already set
+    click.secho(
+        "  Optional: curator name (stamped onto every decision saved from the viewer).\n"
+        "  Press Enter to skip — the viewer will prompt once on first save instead.",
+        dim=True)
+    name = click.prompt("  curator", default="", show_default=False).strip()
+    if not name:
+        return
+    # Splice `curator: <name>` near the top of the YAML, preserving comments.
+    text = config_path.read_text()
+    if "\ncurator:" in text or text.startswith("curator:"):
+        return  # don't double-write if a `curator:` key already exists with empty value
+    # Insert after the `project_name:` line if present, else prepend
+    lines = text.splitlines(keepends=True)
+    new_line = f"curator: {name}\n"
+    out: list[str] = []
+    spliced = False
+    for ln in lines:
+        out.append(ln)
+        if not spliced and ln.lstrip().startswith("project_name:"):
+            out.append(new_line)
+            spliced = True
+    if not spliced:
+        out.insert(0, new_line)
+    config_path.write_text("".join(out))
+    click.secho(f"  ✓ added curator: {name} to {config_path.name}", fg="green")
+
+
 def _stage_propose(root: Path, output_path: Path,
                    *, name: str | None, guess_tables: bool) -> Path | None:
     """Generate YAML, show it, allow edit-in-$EDITOR, return accepted path or None."""
@@ -358,6 +398,7 @@ def _stage_propose(root: Path, output_path: Path,
             choices = ["accept", "map-unmapped", "edit", "quit"]
         ans = _prompt_choice("review", choices, default="a")
         if ans == "a":
+            _prompt_curator_into_yaml(output_path)
             return output_path
         if ans == "q":
             return None

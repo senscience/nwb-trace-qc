@@ -133,6 +133,10 @@ class ProjectConfig(BaseModel):
     # Interactive viewer settings
     viewer_url: str = "http://127.0.0.1:8765"
     viewer_cache_thumbnails: bool = True
+    # v0.8.0: curator identity stamped onto qc_overrides.csv rows when the
+    # viewer saves a per-cell decision. Empty ⇒ viewer prompts once per
+    # session and stashes the answer in localStorage.
+    curator: str = ""
     # Quality-of-recording controls (v0.4.0)
     trim_bad_ending: bool = True       # auto-detect + trim degraded tail sweeps
     use_efel: bool = True              # source AP/Vrest features from eFEL when available

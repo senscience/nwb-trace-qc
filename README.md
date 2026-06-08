@@ -7,7 +7,7 @@ classify each cell as **pass / flag / fail** against editable thresholds, and
 surface only the cells that need human attention in a self-contained HTML report
 plus an interactive sweep viewer.
 
-Current pipeline version: **0.7.0**.
+Current pipeline version: **0.8.0** — viewer-driven curation.
 
 ## What it computes
 
@@ -163,14 +163,21 @@ the viewer.
   overshoot collapses get the bad tail automatically trimmed from the metric
   scalars. The report and viewer both make the trim point visible (banner,
   per-sweep ✂ marker, cell-list chip).
-- **Human-first triage.** The HTML report defaults to flag+fail only, with a
-  tiered chip layout (critical-first, advisory folded under "+N advisory") and
-  inline thumbnails of the offending sweeps. Pass cells stay invisible.
-- **Sticky overrides.** `qc_overrides.csv` is the only file humans edit;
-  verdict overrides survive re-runs, threshold edits, and pipeline upgrades.
-- **Shareable.** `qc_report.html` is fully self-contained (thumbnails inlined,
-  no external assets) — drop it in Slack or email and the recipient can open
-  it with zero install.
+- **Viewer-driven curation (v0.8.0).** The auto-pipeline produces a triage
+  *queue*; the human decision lives in the viewer. A Decision block next to
+  each cell lets you tag PASS / FLAG / FAIL with a reason — your name and
+  the date stamp automatically (curator name comes from `curator:` in your
+  project YAML, falling back to a one-shot prompt). Decisions persist to
+  `qc_overrides.csv` (same file the pipeline has always used) so they
+  survive re-runs and threshold edits.
+- **Curation log as the report.** `qc_report.html` is now a curation log,
+  not a thumbnail dashboard: two sections — *Awaiting review* (cells the
+  curator hasn't touched yet, sorted fail → flag) and *Curated* (cells
+  with a saved decision, showing the curator, date, and reason). Sweep
+  exploration happens in the viewer where the overlay plot + family
+  toggles + zoom already work well, so the report dropped its per-cell
+  thumbnail grid; file size goes from ~10–50 MB down to under ~500 KB,
+  making it actually shareable.
 - **Editable thresholds + trim, live in the viewer (v0.7.0).** Every headline
   metric in the viewer has an inline pencil icon to edit its pass/flag/fail
   bounds; saving writes a `threshold_overrides.yaml` overlay that the next

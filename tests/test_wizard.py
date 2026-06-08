@@ -63,7 +63,8 @@ def test_wizard_happy_path(wizard_tree: Path, tmp_path: Path):
         main, ["start", str(wizard_tree), "--output", str(out_yaml)],
         # 6 prompts (v0.4.x): [y]es → [a]ccept-config → [a]ccept-thresholds
         # → [r]un → (no prompt after run output) → [d]one
-        input="y\na\na\nr\nd\n",
+        # v0.8.0: a blank line after the first 'a' skips the curator prompt
+        input="y\na\n\na\nr\nd\n",
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -225,7 +226,8 @@ def test_wizard_aborts_at_review_thresholds_with_q(wizard_tree: Path, tmp_path: 
     # y (inspect) → a (propose) → q (review-thresholds)
     result = runner.invoke(
         main, ["start", str(wizard_tree), "--output", str(out_yaml)],
-        input="y\na\nq\n",
+        # v0.8.0: blank line skips the new curator prompt between accept-config and thresholds
+        input="y\na\n\nq\n",
     )
     assert result.exit_code == 1, result.output
     assert "aborted at review-thresholds" in result.output
@@ -265,7 +267,8 @@ def test_wizard_auto_writes_cohort_stats_and_suggested_thresholds(wizard_tree: P
         main, ["start", str(wizard_tree), "--output", str(out_yaml)],
         # 6 prompts (v0.4.x): [y]es → [a]ccept-config → [a]ccept-thresholds
         # → [r]un → (no prompt after run output) → [d]one
-        input="y\na\na\nr\nd\n",
+        # v0.8.0: a blank line after the first 'a' skips the curator prompt
+        input="y\na\n\na\nr\nd\n",
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output

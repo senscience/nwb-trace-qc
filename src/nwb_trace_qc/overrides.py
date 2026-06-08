@@ -114,3 +114,45 @@ def upsert_trim_override(path: Path, *, nwb_sha256: str, trim_at_sweep: int,
     tmp = path.with_suffix(path.suffix + ".tmp")
     out.to_csv(tmp, index=False)
     tmp.replace(path)
+
+
+# ─── Verdict overrides (v0.8.0 viewer-driven curation) ──────────────
+
+def upsert_override(path: Path, *, cell_id: str, override_verdict: str,
+                     note: str = "", reviewer: str = "", date: str = "") -> None:
+    """Insert or update a per-cell verdict override row, atomically.
+
+    Mirrors `upsert_trim_override` shape — same CSV the human-maintained
+    workflow has always used; we just add a programmatic writer so the
+    viewer's curation UI can persist decisions without users opening
+    the CSV by hand.
+    """
+    init_overrides_file(path)
+    df = pd.read_csv(path, dtype=str).fillna("")
+    df = df[df["cell_id"] != cell_id]
+    new_row = pd.DataFrame([{
+        "cell_id": cell_id, "override_verdict": override_verdict,
+        "note": note, "reviewer": reviewer, "date": date,
+    }])
+    out = pd.concat([df, new_row], ignore_index=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    out.to_csv(tmp, index=False)
+    tmp.replace(path)
+
+
+def delete_override(path: Path, *, cell_id: str) -> bool:
+    """Drop the override row for ``cell_id``. Returns True if a row was
+    removed, False if no row existed. No-op when the file is missing."""
+    if not path.exists():
+        return False
+    df = pd.read_csv(path, dtype=str).fillna("")
+    if "cell_id" not in df.columns:
+        return False
+    before = len(df)
+    df = df[df["cell_id"] != cell_id]
+    if len(df) == before:
+        return False
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    tmp.replace(path)
+    return True

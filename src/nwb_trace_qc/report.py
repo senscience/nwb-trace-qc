@@ -317,33 +317,49 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
             f"</details>"
         )
 
-    rows_html = []
+    curated_rows_html: list[str] = []
+    awaiting_rows_html: list[str] = []
     datasets_seen = sorted(report_df["dataset"].dropna().astype(str).unique())
+    n_curated_pass = n_curated_flag = n_curated_fail = 0
+    n_awaiting_pass = n_awaiting_flag = n_awaiting_fail = 0
+    curators_active: set[str] = set()
+    curation_dates: list[str] = []
     for i, row in report_df.iterrows():
         cell_id = str(row["cell_id"])
         dataset = str(row.get("dataset", ""))
         verdict = str(row.get("final_verdict", "pass"))
         computed = str(row.get("computed_verdict", verdict))
+        override_verdict = str(row.get("override_verdict", "") or "").strip()
+        is_curated = bool(override_verdict)
         triggers_list = _parse_triggers(row.get("triggered_metrics"))
         triggered = _trigger_chips(triggers_list, row)
         health_card = _render_health_card(row, thresholds)
         override_note = str(row.get("override_note", "") or "")
+        override_reviewer = str(row.get("override_reviewer", "") or "")
+        override_date = str(row.get("override_date", "") or "")
+        if is_curated:
+            curators_active.add(override_reviewer or "(anonymous)")
+            if override_date:
+                curation_dates.append(override_date)
+            if override_verdict == "pass":  n_curated_pass += 1
+            elif override_verdict == "flag": n_curated_flag += 1
+            elif override_verdict == "fail": n_curated_fail += 1
+        else:
+            if verdict == "pass":  n_awaiting_pass += 1
+            elif verdict == "flag": n_awaiting_flag += 1
+            elif verdict == "fail": n_awaiting_fail += 1
         # Build metric cells
         metric_cells = "".join(
             f"<td>{_format_value(row.get(c))}</td>" for c in metric_columns
         )
-        # Build expansion panel (full metric values + thumbnails)
+        # Build expansion panel (full metric values; no thumbnails — the viewer is
+        # the way to explore sweeps now, v0.8.0)
         full_metrics = "".join(
             f"<tr><th>{html.escape(c)}</th><td>{_format_value(row.get(c))}</td></tr>"
             for c in report_df.columns
             if c not in {"cell_id", "dataset", "final_verdict", "computed_verdict",
-                          "triggered_metrics", "override_note", "override_reviewer",
-                          "override_date", "nwb_sha256", "nwb_path"}
-        )
-        thumbs = thumbnails.get(cell_id, [])
-        thumb_html = "".join(
-            f"<img src='data:image/png;base64,{_png_b64(t)}' alt='{html.escape(t.name)}' />"
-            for t in thumbs
+                          "triggered_metrics", "override_verdict", "override_note",
+                          "override_reviewer", "override_date", "nwb_sha256", "nwb_path"}
         )
         # "Inspect these families" hint — derived from triggered metrics, so
         # the triager knows which sweep types to look at instead of scrolling
@@ -356,7 +372,7 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
                 f"target='_blank' rel='noopener' "
                 f"onclick='return _openViewer(event, this)' "
-                f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
+                f"title='Requires `nwb-qc serve` to be running'>Curate in viewer →</a></div>"
             )
         else:
             implicated_block = (
@@ -364,16 +380,21 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
                 f"<a class='viewer-link' href='{html.escape(viewer_url)}/?cell={html.escape(cell_id)}' "
                 f"target='_blank' rel='noopener' "
                 f"onclick='return _openViewer(event, this)' "
-                f"title='Requires `nwb-qc serve` to be running'>Inspect all sweeps in viewer →</a></div>"
+                f"title='Requires `nwb-qc serve` to be running'>Curate in viewer →</a></div>"
             )
+        # v0.8.0 — curation block (replaces the older "Override active" notice).
+        # When a curator has made a decision, show who/when/why prominently.
         override_block = ""
-        if override_note or row.get("override_reviewer") or computed != verdict:
+        if is_curated:
             override_block = (
-                f"<div class='override'>"
-                f"<b>Override active</b> — computed verdict was "
-                f"<span class='chip chip-{computed}'>{computed}</span>; "
-                f"reviewer: {html.escape(str(row.get('override_reviewer','')))}; "
-                f"note: {html.escape(override_note)}</div>"
+                f"<div class='override override-curated'>"
+                f"<b>Curated <span class='chip chip-{override_verdict}'>{override_verdict.upper()}</span></b> "
+                f"by <b>{html.escape(override_reviewer or '—')}</b>"
+                f"{(' on ' + html.escape(override_date)) if override_date else ''}"
+                f" · auto verdict was "
+                f"<span class='chip chip-{computed}'>{computed}</span>"
+                f"{('<div class=\"override-note\">“' + html.escape(override_note) + '”</div>') if override_note else ''}"
+                f"</div>"
             )
         vision_block = ""
         vv = row.get("vision_verdict")
@@ -391,36 +412,34 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
             )
         row_metrics_tags = " ".join(sorted({str(t.get("metric", "")) for t in triggers_list
                                               if t.get("verdict") in {"flag", "fail"}}))
-        rows_html.append(f"""
-<tr class='row row-{verdict}' data-verdict='{verdict}' data-dataset='{html.escape(dataset)}' data-cellid='{html.escape(cell_id)}' data-trigmetrics='{html.escape(row_metrics_tags)}'>
+        # Per-row reviewer/date columns surface on the curated table; they're
+        # cheap to render and skipped via CSS for the awaiting one.
+        reviewer_cell = (f"<td class='reviewer'>{html.escape(override_reviewer)}"
+                         f"<span class='date'>{html.escape(override_date)}</span>"
+                         f"<div class='note'>{html.escape(override_note)}</div></td>") if is_curated else ""
+        row_html = f"""
+<tr class='row row-{verdict}' data-verdict='{verdict}' data-dataset='{html.escape(dataset)}' data-cellid='{html.escape(cell_id)}' data-trigmetrics='{html.escape(row_metrics_tags)}' data-curated='{1 if is_curated else 0}'>
   <td class='expander' onclick='toggle(this)'><span class='caret'>▸</span></td>
   <td class='cellid'>{html.escape(cell_id)}</td>
   <td>{html.escape(dataset)}</td>
   <td><span class='verdict v-{verdict}'>{verdict.upper()}</span></td>
   <td class='triggered'>{triggered}</td>
+  {reviewer_cell}
   {metric_cells}
 </tr>
 <tr class='detail' data-cellid='{html.escape(cell_id)}'>
-  <td colspan='{5 + len(metric_columns)}'>
+  <td colspan='{(6 if is_curated else 5) + len(metric_columns)}'>
     {override_block}
     {vision_block}
     {health_card}
     {implicated_block}
-    <div class='detail-grid'>
-      <div class='detail-metrics'>
-        <details class='full-metrics-fold'>
-          <summary>show all metric values</summary>
-          <table class='kv'>{full_metrics}</table>
-        </details>
-      </div>
-      <div class='detail-thumbs'>{thumb_html}</div>
-    </div>
-    <div class='override-template'>
-      To override, append to <code>qc_overrides.csv</code>:
-      <pre>{html.escape(cell_id)},pass,&lt;your reason&gt;,&lt;your name&gt;,{datetime.now(timezone.utc).date()}</pre>
-    </div>
+    <details class='full-metrics-fold'>
+      <summary>show all metric values</summary>
+      <table class='kv'>{full_metrics}</table>
+    </details>
   </td>
-</tr>""")
+</tr>"""
+        (curated_rows_html if is_curated else awaiting_rows_html).append(row_html)
 
     dataset_buttons = "".join(
         f"<button data-filter-dataset='{html.escape(d)}'>{html.escape(d)}</button>"
@@ -527,12 +546,23 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .expander {{ cursor: pointer; width: 1.2rem; }}
   .detail {{ display: none; background: #fcfcfd; }}
   .detail.open {{ display: table-row; }}
-  .detail-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 0.5rem; }}
-  .detail-thumbs img {{ max-width: 100%; border: 1px solid #ddd; margin-bottom: 0.5rem; }}
   table.kv {{ border-collapse: collapse; font-size: 0.8rem; }}
   table.kv th, table.kv td {{ padding: 0.2rem 0.6rem; border-bottom: 1px solid #f0f0f0; text-align: left; }}
   .override {{ background: #fff3cd; padding: 0.5rem 0.75rem; border-left: 3px solid #f0ad4e; margin: 0.5rem; }}
-  .override-template {{ font-size: 0.8rem; color: #666; padding: 0.5rem; }}
+  .override-curated {{ background: #d4edda; border-left-color: #28a745; color: #155724; }}
+  .override-curated .chip {{ font-size: 0.78rem; padding: 0.15rem 0.5rem; margin-left: 0.15rem; }}
+  .override-curated .override-note {{ margin-top: 0.35rem; font-style: italic; color: #2a4d3a; font-size: 0.88rem; }}
+  /* Two-section layout: awaiting + curated */
+  .section-h {{ font-size: 1rem; margin: 1.5rem 0 0.4rem; color: #444; }}
+  .section-h .count {{ display: inline-block; background: #eef1f5; color: #555; font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 10px; margin-left: 0.4rem; vertical-align: middle; font-weight: 500; }}
+  .awaiting-pill {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.78rem; font-weight: 600; background: #eaeef3; color: #2a4d6a; }}
+  .curator-meta {{ font-size: 0.78rem; color: #555; margin-top: 0.35rem; }}
+  .empty-section {{ padding: 1.2rem 1rem; background: #f7f8fa; border: 1px dashed #cbd1da; border-radius: 4px; color: #555; font-style: italic; }}
+  .workflow-note {{ background: #f4f8fa; border-left: 3px solid #5a9ad6; padding: 0.5rem 0.75rem; margin: 0.5rem 0 1rem; font-size: 0.86rem; color: #345; }}
+  .workflow-note code {{ background: #fff; padding: 0.1rem 0.35rem; border-radius: 2px; font-size: 0.92em; }}
+  td.reviewer {{ font-size: 0.78rem; color: #2a4d3a; min-width: 11rem; }}
+  td.reviewer .date {{ display: block; color: #666; font-size: 0.72rem; }}
+  td.reviewer .note {{ margin-top: 0.2rem; font-style: italic; color: #333; max-width: 24rem; }}
   pre {{ background: #f4f6f8; padding: 0.4rem; border-radius: 3px; white-space: pre-wrap; }}
   .row.hidden, .detail.hidden {{ display: none !important; }}
   /* Viewer-status banner */
@@ -570,16 +600,27 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
 
 <div class='summary'>
   <div>
-    <b>Overall</b><br>
-    {n_total} cells &nbsp; · &nbsp;
-    <span class='verdict v-pass'>PASS {n_pass}</span>
-    <span class='verdict v-flag'>FLAG {n_flag}</span>
-    <span class='verdict v-fail'>FAIL {n_fail}</span>
+    <b>Curation status</b><br>
+    <span class='verdict v-pass'>CURATED-PASS {n_curated_pass}</span>
+    <span class='verdict v-flag'>CURATED-FLAG {n_curated_flag}</span>
+    <span class='verdict v-fail'>CURATED-FAIL {n_curated_fail}</span>
+    &nbsp;·&nbsp;
+    <span class='awaiting-pill'>AWAITING {n_awaiting_pass + n_awaiting_flag + n_awaiting_fail}</span>
+    <div class='curator-meta'>
+      {("Curators: <b>" + ", ".join(sorted(curators_active)) + "</b>") if curators_active else "<i>no decisions saved yet</i>"}
+      {(" · last decision " + max(curation_dates)) if curation_dates else ""}
+    </div>
   </div>
   <div>
     <b>By dataset</b>
     <table><tr><th>dataset</th><th>pass</th><th>flag</th><th>fail</th></tr>{per_ds_rows}</table>
   </div>
+</div>
+
+<div class='workflow-note'>
+  <b>Decisions live in the viewer.</b> Click <code>Curate in viewer →</code> on any awaiting row,
+  inspect the sweeps, and tag the cell PASS / FLAG / FAIL with a reason. Saves to
+  <code>qc_overrides.csv</code> and re-renders this report on the next <code>nwb-qc report</code>.
 </div>
 
 {failure_recipe_html}
@@ -596,19 +637,28 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   <input type='search' id='search' placeholder='search by cell_id…' />
 </div>
 
-<table class='cells'>
-<thead><tr>
-  <th></th>
-  <th data-sort='cellid'>cell_id</th>
-  <th data-sort='dataset'>dataset</th>
-  <th data-sort='verdict'>verdict</th>
-  <th>triggered</th>
-  {metric_headers}
-</tr></thead>
-<tbody>
-{''.join(rows_html)}
-</tbody>
-</table>
+<h2 class='section-h'>Awaiting review <span class='count'>{n_awaiting_pass + n_awaiting_flag + n_awaiting_fail}</span></h2>
+{('<table class="cells"><thead><tr>'
+    '<th></th>'
+    '<th data-sort=cellid>cell_id</th>'
+    '<th data-sort=dataset>dataset</th>'
+    '<th data-sort=verdict>auto verdict</th>'
+    '<th>triggered</th>'
+    + metric_headers
+    + '</tr></thead><tbody>' + ''.join(awaiting_rows_html) + '</tbody></table>')
+   if awaiting_rows_html else "<div class='empty-section'>Nothing left to review — every cell has been curated.</div>"}
+
+<h2 class='section-h'>Curated <span class='count'>{n_curated_pass + n_curated_flag + n_curated_fail}</span></h2>
+{('<table class="cells"><thead><tr>'
+    '<th></th>'
+    '<th data-sort=cellid>cell_id</th>'
+    '<th data-sort=dataset>dataset</th>'
+    '<th data-sort=verdict>verdict</th>'
+    '<th>triggered (at curation)</th>'
+    '<th>curator / date / note</th>'
+    + metric_headers
+    + '</tr></thead><tbody>' + ''.join(curated_rows_html) + '</tbody></table>')
+   if curated_rows_html else "<div class='empty-section'>No decisions saved yet — open a cell in the viewer to start curating.</div>"}
 
 <script>
 function toggle(td) {{

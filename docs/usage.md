@@ -398,16 +398,32 @@ metric_name:
 
 Verdict precedence: any `fail` wins; else any `flag`; else `pass`. NaN values produce a soft flag (insufficient data), not a fail.
 
-### 6b — Stick a verdict by hand
+### 6b — Stick a verdict (v0.8.0: curate from the viewer)
 
-Append to `qc_output_mydata/qc_overrides.csv` (the expand-row panel in the static report shows a copyable template per cell):
+The primary path is now the viewer's **Decision** block. Open a cell in
+`nwb-qc serve`, click PASS / FLAG / FAIL, type a reason, save. The viewer
+writes a row into `qc_output_mydata/qc_overrides.csv` with your name (from
+`curator:` in the project YAML, or a one-shot localStorage prompt) and
+today's date — then re-colors the cell-list verdict chip immediately. The
+next `nwb-qc run` or `nwb-qc report` picks up the same overrides.
+
+The same CSV is still hand-editable for bulk corrections or scripting:
 
 ```csv
 cell_id,override_verdict,note,reviewer,date
 sample_42,pass,manually inspected — overshoot loss is end-of-recording artefact,you,2026-06-03
 ```
 
-Overrides survive re-runs and threshold edits. They're applied last, so a human verdict trumps everything else.
+Overrides survive re-runs and threshold edits. They're applied last, so a
+human verdict trumps everything else. The static report's *Curated*
+section lists every saved decision with curator/date/note; the *Awaiting
+review* section is your queue — each row has a `Curate in viewer →` deep
+link straight to that cell in `nwb-qc serve`.
+
+**Curator name precedence** for viewer-driven saves:
+1. `body.curator` in the POST (only the viewer's "change" link uses this)
+2. `cfg.curator` from the project YAML
+3. `localStorage.nwb_qc_curator` (set by the viewer's first-save modal)
 
 ### 6g — Inventory pre-computed metrics in your NWBs (`nwb-qc inventory-metrics`)
 

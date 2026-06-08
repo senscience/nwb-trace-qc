@@ -97,6 +97,52 @@
   .mrow .pencil:hover { opacity: 1; color: var(--link); }
   .mrow .pencil.overridden { color: var(--warn); opacity: 1; }
 
+  /* Curation block — the workflow's centerpiece. Sits between the headline
+     metrics and the cell-metadata fold so the curator's decision context is
+     adjacent to the values driving it. */
+  #curation-block {
+    margin-top: 1rem; padding: .6rem .65rem .55rem;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+  }
+  #curation-block h3 { font-size: .82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .35rem; }
+  #curation-block .auto { font-size: .72rem; color: var(--muted); margin-bottom: .35rem; }
+  #curation-block .auto .v { font-weight: 600; padding: 1px 5px; border-radius: 2px; }
+  #curation-block .auto .v.v-pass { background: #2d4a3a; color: #b6e5c8; }
+  #curation-block .auto .v.v-flag { background: #4a3f28; color: #f0d595; }
+  #curation-block .auto .v.v-fail { background: #4a2d2d; color: #f4b6b6; }
+  #curation-block .verdict-buttons { display: flex; gap: .35rem; margin-bottom: .35rem; }
+  #curation-block .vbtn {
+    flex: 1; padding: .4rem .35rem; font-size: .78rem; font-weight: 700;
+    background: #1a1d22; color: var(--text); border: 1px solid var(--border);
+    border-radius: 3px; cursor: pointer; letter-spacing: .02em;
+  }
+  #curation-block .vbtn[data-v="pass"]:hover, #curation-block .vbtn[data-v="pass"].active { background: #2d4a3a; color: #b6e5c8; border-color: var(--accent); }
+  #curation-block .vbtn[data-v="flag"]:hover, #curation-block .vbtn[data-v="flag"].active { background: #4a3f28; color: #f0d595; border-color: var(--warn); }
+  #curation-block .vbtn[data-v="fail"]:hover, #curation-block .vbtn[data-v="fail"].active { background: #4a2d2d; color: #f4b6b6; border-color: var(--danger); }
+  #curation-block textarea {
+    width: 100%; box-sizing: border-box; background: #1a1d22; color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px; padding: .35rem .45rem;
+    font-family: inherit; font-size: .78rem; resize: vertical; min-height: 2.4rem;
+  }
+  #curation-block .save-row {
+    display: flex; align-items: center; gap: .5rem; margin-top: .4rem;
+    font-size: .72rem; color: var(--muted);
+  }
+  #curation-block .save-row .as { flex: 1; }
+  #curation-block .save-row .as code { color: var(--link); }
+  #curation-block .save-row .as .change { color: var(--link); cursor: pointer; text-decoration: underline; margin-left: .35rem; }
+  #curation-block .save-row button {
+    background: #2a4d3d; color: var(--accent); border: 1px solid var(--accent);
+    padding: .3rem .7rem; font-size: .76rem; border-radius: 3px; cursor: pointer;
+  }
+  #curation-block .save-row button.danger { background: transparent; color: var(--danger); border-color: #5a3434; }
+  #curation-block .save-row button:disabled { opacity: .45; cursor: not-allowed; }
+  #curation-block.curated { border-color: var(--accent); }
+  #curation-block .curated-line { font-size: .82rem; color: var(--text); margin-bottom: .25rem; }
+  #curation-block .curated-line .v { font-weight: 700; padding: 1px 6px; border-radius: 2px; }
+  #curation-block .curated-line .who { color: var(--muted); }
+  #curation-block .note { font-size: .74rem; color: var(--text); font-style: italic; margin: .15rem 0 .4rem; }
+
   #metadata-collapse { margin-top: 1rem; }
   #metadata-collapse summary { cursor: pointer; font-size: .82rem; color: var(--muted); padding: .25rem 0; }
   #metadata-collapse summary::-webkit-details-marker { color: var(--muted); }
@@ -158,6 +204,7 @@
       <aside id="metrics-panel">
         <h3>Headline metrics</h3>
         <div id="headline-metrics"></div>
+        <div id="curation-block"><h3>Decision</h3><div class="auto">select a cell to curate</div></div>
         <details id="metadata-collapse">
           <summary>Cell metadata</summary>
           <table id="metadata-table"></table>
@@ -171,7 +218,9 @@ const MAX_POINTS = 1500;
 const SKIP_KEYS = new Set([
   'cell_id','dataset','nwb_path','nwb_sha256',
   'computed_verdict','final_verdict','triggered_metrics',
-  'override_note','override_reviewer','override_date',
+  // v0.8.0: override_* now drives the Curation block, so we still keep them
+  // out of the bottom "Cell metadata" table (they're surfaced separately).
+  'override_verdict','override_note','override_reviewer','override_date',
   'computed_verdict_with_vision','vision_reason',
   'vision_verdict','vision_confidence','vision_notes',
   'ephys_qc_score','vrest_mv_provenance','rs_mohm_provenance',
@@ -360,6 +409,7 @@ async function selectCell(cellId) {
   renderFamilyToggles(row);
   renderTrimSlider();
   renderHeadlineMetrics(row);
+  renderCurationBlock(row);
   renderMetadataTable(row);
 
   // Fetch all traces in parallel (with concurrency cap so we don't hammer)
@@ -867,6 +917,170 @@ function renderHeadlineMetrics(row) {
   });
 }
 
+// ─── Curation decision block (v0.8.0) ────────────────────────────
+let CURATOR = '';  // resolved at startup from /api/curator → localStorage → modal
+let _pendingReason = '';  // per-cell draft of the reason textbox; survives re-renders
+
+async function loadCurator() {
+  // Precedence: project YAML cfg.curator → localStorage → empty (prompt later).
+  try {
+    const r = await fetch('/api/curator');
+    if (r.ok) {
+      const body = await r.json();
+      if (body.curator) { CURATOR = body.curator; return; }
+    }
+  } catch (e) {}
+  CURATOR = localStorage.getItem('nwb_qc_curator') || '';
+}
+
+function ensureCurator() {
+  // Block-save path: if CURATOR is empty, prompt for it now and stash locally.
+  if (CURATOR) return Promise.resolve(CURATOR);
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML = `
+      <div class="modal">
+        <h4>Who's curating?</h4>
+        <div class="desc">This name is stamped onto every decision you save and shown in the report. You can change it later from the panel's "as &lt;name&gt;" line.</div>
+        <div class="row"><label>Curator</label><input id="curator-input" placeholder="cristina"/></div>
+        <div class="actions">
+          <button id="curator-cancel">cancel</button>
+          <button class="primary" id="curator-save">save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(back);
+    const input = back.querySelector('#curator-input');
+    input.focus();
+    const close = (v) => { back.remove(); resolve(v); };
+    back.querySelector('#curator-cancel').onclick = () => close('');
+    back.querySelector('#curator-save').onclick = () => {
+      const v = input.value.trim();
+      if (!v) return;
+      CURATOR = v;
+      localStorage.setItem('nwb_qc_curator', v);
+      close(v);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') back.querySelector('#curator-save').click();
+    });
+  });
+}
+
+function _autoVerdictSummary(row) {
+  const v = (row.computed_verdict || row.final_verdict || '').toLowerCase();
+  const items = Array.isArray(row.triggered_metrics) ? row.triggered_metrics : [];
+  const list = items.slice(0, 3).map(t => `${t.metric}${t.reason ? ' (' + t.reason + ')' : ''}`).join(', ');
+  const extra = items.length > 3 ? ` +${items.length - 3}` : '';
+  return { verdict: v, summary: list ? list + extra : '' };
+}
+
+function renderCurationBlock(row) {
+  const el = $('#curation-block');
+  if (!row) { el.innerHTML = '<h3>Decision</h3><div class="auto">select a cell to curate</div>'; el.classList.remove('curated'); return; }
+  const overrideV = (row.override_verdict || '').toLowerCase();
+  const auto = _autoVerdictSummary(row);
+  if (overrideV) {
+    // CURATED state — show who/when/why and offer edit/clear.
+    el.classList.add('curated');
+    const reviewer = row.override_reviewer || '—';
+    const when = row.override_date || '';
+    const note = row.override_note || '';
+    el.innerHTML = `
+      <h3>Decision</h3>
+      <div class="curated-line">
+        Curated <span class="v v-${overrideV}">${overrideV.toUpperCase()}</span>
+        <span class="who">by <b>${reviewer}</b>${when ? ' on ' + when : ''}</span>
+      </div>
+      ${note ? `<div class="note">"${note}"</div>` : ''}
+      <div class="auto">auto verdict was <span class="v v-${auto.verdict}">${auto.verdict.toUpperCase()}</span>${auto.summary ? ' · ' + auto.summary : ''}</div>
+      <div class="save-row">
+        <span class="as">saving as <code>${CURATOR || '(unset)'}</code> <span class="change" data-act="change-curator">change</span></span>
+        <button data-act="edit">edit</button>
+        <button data-act="clear" class="danger">clear</button>
+      </div>`;
+  } else {
+    // UNCURATED state — three buttons + reason textbox.
+    el.classList.remove('curated');
+    const prefill = _pendingReason || (auto.summary ? `auto ${auto.verdict}: ${auto.summary}` : '');
+    el.innerHTML = `
+      <h3>Decision</h3>
+      <div class="auto">auto verdict <span class="v v-${auto.verdict}">${auto.verdict.toUpperCase()}</span>${auto.summary ? ' · ' + auto.summary : ''}</div>
+      <div class="verdict-buttons">
+        <button class="vbtn" data-v="pass">PASS</button>
+        <button class="vbtn" data-v="flag">FLAG</button>
+        <button class="vbtn" data-v="fail">FAIL</button>
+      </div>
+      <textarea id="curation-reason" placeholder="why? (optional, but recommended)">${prefill.replace(/</g,'&lt;')}</textarea>
+      <div class="save-row">
+        <span class="as">saving as <code>${CURATOR || '(unset)'}</code> <span class="change" data-act="change-curator">change</span></span>
+      </div>`;
+  }
+  // Wire actions
+  el.querySelectorAll('.vbtn[data-v]').forEach(b => {
+    b.onclick = () => saveCuration(b.dataset.v);
+  });
+  el.querySelectorAll('[data-act="clear"]').forEach(b => { b.onclick = () => saveCuration(''); });
+  el.querySelectorAll('[data-act="edit"]').forEach(b => {
+    b.onclick = () => {
+      // Drop the curated state locally so the textarea+buttons re-render;
+      // server stays unchanged until the user picks a new verdict.
+      const r = CELLS.find(c => c.cell_id === activeCell);
+      if (!r) return;
+      _pendingReason = r.override_note || '';
+      delete r.override_verdict; delete r.override_note;
+      delete r.override_reviewer; delete r.override_date;
+      // Re-color cell-list using computed_verdict
+      if (r.computed_verdict) r.final_verdict = r.computed_verdict;
+      renderCurationBlock(r); renderCellHeader(r); renderCellList();
+    };
+  });
+  el.querySelectorAll('[data-act="change-curator"]').forEach(b => {
+    b.onclick = async () => {
+      const prev = CURATOR;
+      CURATOR = '';
+      const v = await ensureCurator();
+      if (!v) CURATOR = prev;  // user cancelled
+      const r = CELLS.find(c => c.cell_id === activeCell);
+      renderCurationBlock(r);
+    };
+  });
+  const ta = el.querySelector('#curation-reason');
+  if (ta) ta.addEventListener('input', () => { _pendingReason = ta.value; });
+}
+
+async function saveCuration(verdict) {
+  const row = CELLS.find(c => c.cell_id === activeCell);
+  if (!row) return;
+  if (verdict) {
+    // Need a curator name before recording an affirmative decision.
+    await ensureCurator();
+    if (!CURATOR) { toast('curator name required to save', true); return; }
+  }
+  const note = ($('#curation-reason') && $('#curation-reason').value) || '';
+  try {
+    const r = await fetch('/api/curation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cell_id: activeCell, verdict, note, curator: CURATOR }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const body = await r.json();
+    if (Array.isArray(body.cells)) {
+      const byId = new Map(body.cells.map(c => [c.cell_id, c]));
+      for (let i = 0; i < CELLS.length; i++) {
+        const fresh = byId.get(CELLS[i].cell_id);
+        if (fresh) CELLS[i] = fresh;
+      }
+    }
+    _pendingReason = '';
+    const refreshed = CELLS.find(c => c.cell_id === activeCell);
+    renderCurationBlock(refreshed);
+    renderCellHeader(refreshed);
+    renderCellList();
+    toast(verdict ? `marked ${verdict.toUpperCase()} as ${CURATOR}` : 'curation cleared');
+  } catch (e) { toast('save failed: ' + e, true); }
+}
+
 function renderMetadataTable(row) {
   const tbody = $('#metadata-table');
   tbody.innerHTML = '';
@@ -977,6 +1191,7 @@ setupOverlayInteraction();
 (async () => {
   await loadFamilies();
   await loadThresholds();
+  await loadCurator();
   await loadCells();
 })();
 </script>
