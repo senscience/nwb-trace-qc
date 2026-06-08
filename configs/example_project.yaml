@@ -45,19 +45,44 @@ acquisition_tables:
 
 # 3. Stimulus-protocol family mapping. The pipeline reasons in families; your lab can use
 #    whatever protocol names you want. Edit if needed.
+#
+#    `spontaneous_no_hold` → drives `vrest_mv` (true resting potential, no Ihld).
+#    `spontaneous_held`    → drives `held_vm_mv`, `holding_current_*` (Ihld injected).
+#    The legacy `spontaneous_hold` name still parses but routes to the held family.
 stimulus_protocols:
-  spontaneous_hold: [SponHold3, SponHold30, SponNoHold30, StartHold]
-  test_pulse:       [Rac, TestAmpl, TestRheo]
-  iv_subthreshold:  [IV]
-  ap_waveform:      [APWaveform]
-  rest_firing:      [IDRest]
-  threshold_search: [IDThres, IDThreshold]
+  spontaneous_no_hold: [SponNoHold30, SponNonHold30]
+  spontaneous_held:    [SponHold3, SponHold30, StartHold]
+  test_pulse:          [Rac, TestAmpl, TestRheo]
+  iv_subthreshold:     [IV]
+  ap_waveform:         [APWaveform]
+  rest_firing:         [IDRest]
+  threshold_search:    [IDThres, IDThreshold]
 
 # 4. Thresholds — usually a separate YAML so you can edit without touching project config.
 thresholds_file: ./my_thresholds.yaml
 
 # 5. Execution.
 n_workers: 6
+
+# 5b. (Optional) Metric pipeline tuning — all keys below are optional and shown with their defaults.
+# trim_bad_ending: true        # detect Vrest depolarisation / Rs explosion / AP collapse and exclude
+#                              # the trailing bad sweeps from metric scalars (see bad_ending_*).
+# use_efel: true               # use eFEL as the canonical source for AP and Vrest features
+#                              # (our in-house helpers stay as fallbacks on malformed sweeps).
+# viewer_url: http://127.0.0.1:8765
+#                              # base URL the static report's "Inspect all sweeps →" deep-links use.
+#                              # Set this to your network hostname BEFORE `nwb-qc run` if you plan to
+#                              # share the report and run `nwb-qc serve --host 0.0.0.0` for collaborators.
+# critical_metrics:            # v0.6.0 tiered verdict — only these cascade pass/flag/fail to the
+#                              # cell verdict; advisory metric fails are capped at flag.
+#   - rs_drift_pct
+#   - vrest_mv
+#   - ap_amp_overshoot_mv
+#   - ap_amplitude_mv
+#   - holding_current_drift_pa
+#   - qc_protocol_coverage
+#   - n_sweeps_clipped
+#   - n_sweeps_nan
 
 # 6. (Optional) Cell-id table for richer dataset attribution (e.g. one CSV that knows
 #    which dataset each cell belongs to).

@@ -46,6 +46,50 @@ RN smoke run on 0.2.0 (32 cells, 45 s wall-clock): the new metrics had non-trivi
 
 Vision judge is off by default; enable with `--with-vision` once you've set `ANTHROPIC_API_KEY`. Interactive viewer is one command: `nwb-qc serve --config configs/jy_project.yaml`.
 
+## Pipeline v0.3.0 – v0.6.0 changes affecting this cohort
+
+Each version bumps `PIPELINE_VERSION` and invalidates the per-NWB cache, so the
+next full run picks up everything below. Threshold rules and the metric
+reference are documented in [`metrics_reference.md`](metrics_reference.md).
+
+- **v0.3.0** — whole-cell-patch-clamp methodology fixes:
+  - `rs_*` now read the paired `ics__...` stimulus current series (no longer
+    assumes 50 pA), so absolute Rs is meaningful. The cohort-specific Rs
+    inflation noted above is resolved.
+  - `rin_mohm` is computed from the actual IV slope, not from a derived ratio.
+  - `holding_current_pa` and `holding_current_drift_pa` are real (sourced from
+    `spontaneous_held` family sweeps, e.g. SponHold3 / SponHold30).
+  - Session-drift metrics: `vrest_session_drift_mv`, `rs_session_drift_pct`,
+    `ap_overshoot_session_drift_mv`.
+- **v0.4.0** — bad-ending detection and trim:
+  - Changepoint on Vrest depolarisation / Rs explosion / AP overshoot collapse;
+    a clean tail is excluded from metric scalars before thresholds run.
+    `bad_ending_at_sweep`, `bad_ending_reason`, `n_sweeps_trimmed` are reported.
+  - eFEL parity for AP-overshoot, AP-threshold, Vrest features.
+- **v0.5.0** — LNMC experimenter-guidance metrics:
+  - `vrest_mv` now strictly comes from `spontaneous_no_hold` family;
+    `held_vm_mv` from `spontaneous_held`. The legacy `spontaneous_hold` family
+    name still works but is split into the two above.
+  - `ap_amplitude_mv` (peak − threshold; LNMC canonical).
+  - `rs_compensation_pct` (read from NWB `IntracellularElectrode` metadata).
+  - `rac_variability_pct` (CV of per-Rac Rs across reps — catches
+    non-monotonic instability that `rs_drift_pct` misses).
+- **v0.6.0** — tiered report:
+  - Seven *critical* metrics drive the verdict; failures on *advisory* metrics
+    are demoted to flag, so a single soft signal can't sink a cell. Whitelist
+    is editable per project (`critical_metrics:` in the YAML).
+  - Report layout: critical chips first, advisory folded under "+N advisory",
+    full metric values behind an expand. Trim is surfaced via banner +
+    per-sweep ✂ markers + cell-list chip.
+  - Viewer sorts flag-first, accepts `--host 0.0.0.0` for one-serves-many
+    network sharing.
+
+The expected effect on the JY cohort: the v0.1.0 coverage-failure mass should
+move from `fail` → `flag` (advisory demotion), absolute Rs is now meaningful
+(v0.3.0 fix), and bad-ending trim eliminates spurious fails caused by the last
+few sweeps of a degrading session. Run with the v0.6.0 binary and the existing
+`configs/jy_project.yaml` to see current numbers.
+
 ## Known cohort-specific tuning opportunities
 
 The inaugural defaults flag many cells for two diagnosable cohort-specific reasons; these are notes for future threshold tweaks, not pipeline bugs.
