@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nwb-trace-qc"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Cohort-scale, configurable QC for patch-clamp electrophysiology traces stored in NWB."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,13 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 nwb-qc = "nwb_trace_qc.cli:main"
+
+[tool.setuptools.dynamic]
+# Single source of truth — `__version__` in src/nwb_trace_qc/__init__.py. Bump
+# that file once when releasing; this `version` reads it back. Prevents the
+# pyproject.toml / __init__.py drift we hit with 0.3 → 0.6 (pip kept reporting
+# the package as 0.2.0 because pyproject.toml's static version was never bumped).
+version = { attr = "nwb_trace_qc.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
