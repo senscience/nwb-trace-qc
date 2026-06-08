@@ -1,4 +1,4 @@
-# `nwb-trace-qc` metric reference (v0.6.0)
+# `nwb-trace-qc` metric reference (v0.7.0)
 
 For every metric `nwb-trace-qc` emits, this doc says (a) what the metric
 measures, (b) the healthy range, (c) the implicated stimulus family,
@@ -118,6 +118,13 @@ Regenerate this doc with `python scripts/build_metrics_reference.py`.
 - **Healthy range.** ≈ 0; > 1 = late-sweep runaway oscillation / firing.
 - **Implicated family.** `rest_firing`
 - **Computed by.** `nwb-trace-qc` — Max ratio of late-quartile vs early-quartile rate/variance within a sweep, minus 1.
+
+## `n_spikes_total`
+
+- **What it measures.** Total successful APs detected across ap_waveform + rest_firing sweeps (dV/dt initiations that reach ≥ 0 mV). A coarse but useful signal of firing activity in the recording. Excludes trimmed sweeps.
+- **Healthy range.** Cohort-dependent — context-dependent on the protocol set.
+- **Implicated family.** `ap_waveform`
+- **Computed by.** `nwb-trace-qc` — Sum across ap_waveform + rest_firing sweeps of dV/dt-detected initiations that reach ≥ 0 mV (successful APs). Excludes trimmed sweeps.
 
 ## `n_sweeps_clipped`
 

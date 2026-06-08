@@ -33,7 +33,7 @@ from .metrics import compute_metrics
 from .overrides import apply_overrides, init_overrides_file, load_overrides
 from .report import write_report
 from .stimuli import StimulusFamilyMap
-from .thresholds import evaluate, load_thresholds
+from .thresholds import evaluate, load_thresholds, load_thresholds_with_overrides
 from . import vision as _vision
 
 log = logging.getLogger(__name__)
@@ -42,10 +42,11 @@ ProgressCallback = Callable[[str, int, int], None]
 
 
 def _compute_one(args):
-    nwb_path, nwb_sha256, families, use_efel, trim_bad_ending = args
+    nwb_path, nwb_sha256, families, use_efel, trim_bad_ending, force_trim_at = args
     fm = StimulusFamilyMap(families)
     metrics = compute_metrics(nwb_path, fm,
-                                use_efel=use_efel, trim_bad_ending=trim_bad_ending)
+                                use_efel=use_efel, trim_bad_ending=trim_bad_ending,
+                                force_trim_at=force_trim_at)
     metrics.update({
         "nwb_sha256": nwb_sha256,
         "nwb_path": str(nwb_path),
@@ -327,7 +328,14 @@ def run(
     cache_df = load_cache(cfg.cache_path)
     have = cached_hashes(cache_df)
     uniq = unique_nwbs(manifest)
-    todo = uniq[~uniq["nwb_sha256"].isin(have)]
+    # v0.7.0: load trim overrides; any sha listed there is always recomputed so
+    # the cached row reflects the manual cutoff. append_rows dedupes on
+    # (sha, version) keep-last, so the override-recompute replaces stale rows.
+    from .overrides import load_trim_overrides
+    trim_overrides = load_trim_overrides(cfg.trim_overrides_file) \
+                       if cfg.trim_overrides_file is not None else {}
+    overridden_shas = set(trim_overrides)
+    todo = uniq[~uniq["nwb_sha256"].isin(have) | uniq["nwb_sha256"].isin(overridden_shas)]
     n_cache_hits = int(uniq.shape[0] - todo.shape[0])
     n_compute = 0
 
@@ -335,7 +343,8 @@ def run(
     n_rs_fallback_cells = 0   # NWBs whose Rs computation fell back to the 50 pA hack
     if not report_only and not todo.empty:
         args_list = [(Path(row.nwb_path), row.nwb_sha256, cfg.stimulus_protocols,
-                       cfg.use_efel, cfg.trim_bad_ending)
+                       cfg.use_efel, cfg.trim_bad_ending,
+                       trim_overrides.get(row.nwb_sha256))
                      for row in todo.itertuples(index=False)]
         batch: list[dict] = []
         total = len(args_list)
@@ -397,7 +406,14 @@ def run(
     cache_df = filter_for_version(load_cache(cfg.cache_path))
     if cfg.thresholds_file is None or not cfg.thresholds_file.exists():
         raise FileNotFoundError(f"thresholds_file not found: {cfg.thresholds_file}")
-    thresholds = load_thresholds(cfg.thresholds_file)
+    thresholds, applied_overrides = load_thresholds_with_overrides(
+        cfg.thresholds_file, cfg.threshold_overrides_file
+    )
+    if applied_overrides:
+        log.info(
+            "Applied %d threshold override(s) from %s",
+            len(applied_overrides), cfg.threshold_overrides_file,
+        )
     # v0.6.0: critical-metric whitelist. Empty config list ⇒ bundled defaults.
     from .families import DEFAULT_CRITICAL_METRICS
     critical_metrics = (set(cfg.critical_metrics) if cfg.critical_metrics

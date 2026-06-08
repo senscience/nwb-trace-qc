@@ -117,6 +117,10 @@ class ProjectConfig(BaseModel):
     acquisition_tables: list[AcquisitionTable] = Field(default_factory=list)
     stimulus_protocols: dict[str, list[str]] = Field(default_factory=lambda: dict(_DEFAULT_FAMILIES))
     thresholds_file: Path | None = None
+    # v0.7.0: viewer-editable overlay files (written by `nwb-qc serve`'s threshold
+    # pencils and trim slider). Resolved against output_dir if relative.
+    threshold_overrides_file: Path | None = None
+    trim_overrides_file: Path | None = None
     n_workers: int = 4
     cache_path: Path | None = None
     manifest_path: Path | None = None
@@ -165,7 +169,11 @@ class ProjectConfig(BaseModel):
         if self.report_html is None:      self.report_html = out / "qc_report.html"
         if self.report_csv is None:       self.report_csv = out / "qc_report.csv"
         if self.thumbnails_dir is None:   self.thumbnails_dir = out / "traces"
-        for attr in ("cache_path", "manifest_path", "overrides_path", "report_html", "report_csv", "thumbnails_dir"):
+        if self.threshold_overrides_file is None: self.threshold_overrides_file = out / "threshold_overrides.yaml"
+        if self.trim_overrides_file is None:      self.trim_overrides_file = out / "qc_trim_overrides.csv"
+        for attr in ("cache_path", "manifest_path", "overrides_path", "report_html",
+                      "report_csv", "thumbnails_dir",
+                      "threshold_overrides_file", "trim_overrides_file"):
             v = getattr(self, attr)
             setattr(self, attr, _abs(v))
         if self.thresholds_file is not None:

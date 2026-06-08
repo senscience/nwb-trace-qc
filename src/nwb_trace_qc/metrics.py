@@ -50,23 +50,39 @@ def _name_to_stim(acq_name: str) -> str:
 
 
 def _iter_current_clamp_acqs(nwbfile):
-    """Yield (name, CurrentClampSeries-like) — anything that exposes voltage data + rate.
+    """Yield (name, CurrentClampSeries-like) **in chronological order** —
+    anything that exposes voltage data + rate, sorted by `starting_time`.
 
     Voltage acceptance: the unit string normalises to volts. Common variants:
     `volts`, `V`, `mV`, `millivolts`, `μV`. The actual values are still raw —
     `voltage_si()` in nwb_io applies conversion + unit-prefix when the trace is
     read for analysis. We just gatekeep here so we don't try to interpret a
     current-clamp stimulus channel as a voltage trace.
+
+    v0.7.1 — chronological sort. Some NWB writers group acquisitions by
+    stimulus type rather than chronological order; that broke bad-ending
+    detection and session-drift metrics, which assume the iteration order
+    reflects the real recording timeline. Sweeps without a `starting_time`
+    keep insertion order as a stable fallback.
     """
     voltage_units = {"volts", "v", "mv", "millivolts", "millivolt",
                      "microvolts", "microvolt", "uv", "μv", ""}
-    for name, obj in nwbfile.acquisition.items():
+    pairs: list[tuple[float, int, str, Any]] = []
+    for ins_idx, (name, obj) in enumerate(nwbfile.acquisition.items()):
         data = getattr(obj, "data", None)
         if data is None:
             continue
         unit = (getattr(obj, "unit", "") or "").lower()
         if unit not in voltage_units:
             continue
+        t = getattr(obj, "starting_time", None)
+        # Sort key: chronological when starting_time is present, else inf
+        # so unstarted sweeps land at the tail, preserving relative insertion
+        # order via the secondary key.
+        sort_t = float(t) if (t is not None and not (isinstance(t, float) and math.isnan(t))) else float("inf")
+        pairs.append((sort_t, ins_idx, name, obj))
+    pairs.sort(key=lambda p: (p[0], p[1]))
+    for _t, _i, name, obj in pairs:
         yield name, obj
 
 
@@ -213,6 +229,35 @@ def _vm_drift_slope_mv_per_s(trace_v: np.ndarray, rate_hz: float, min_seconds: f
     return slope_v_per_s * 1000.0  # V/s → mV/s
 
 
+def _detect_spike_initiations(trace_v: np.ndarray, rate_hz: float,
+                                slope_thresh_mv_per_ms: float = 20.0,
+                                window_ms: float = 5.0) -> tuple[int, int]:
+    """Canonical dV/dt spike-initiation detector. Returns (n_initiations, n_successful).
+
+    n_initiations = first sample of each dV/dt > threshold run.
+    n_successful  = initiations whose subsequent `window_ms` window reaches ≥ 0 mV.
+    Both 0 if the trace is too short / the rate is invalid (caller decides whether
+    that's "quiescent sweep" or "broken sweep").
+    """
+    if len(trace_v) < 3 or rate_hz <= 0:
+        return 0, 0
+    dt_ms = 1000.0 / rate_hz
+    dvdt = np.gradient(trace_v * 1000.0) / dt_ms  # mV/ms
+    rising = dvdt > slope_thresh_mv_per_ms
+    starts = np.where(rising[1:] & ~rising[:-1])[0] + 1
+    if len(starts) == 0:
+        return 0, 0
+    win = int(max(1, window_ms * rate_hz / 1000.0))
+    succeeded = 0
+    for s in starts:
+        peak_window = trace_v[s : min(len(trace_v), s + win)]
+        if len(peak_window) == 0:
+            continue
+        if np.max(peak_window) >= 0.0:   # reaches ≥ 0 V (= 0 mV)
+            succeeded += 1
+    return int(len(starts)), succeeded
+
+
 def _failed_spike_fraction(trace_v: np.ndarray, rate_hz: float,
                             slope_thresh_mv_per_ms: float = 20.0,
                             window_ms: float = 5.0) -> float:
@@ -220,24 +265,18 @@ def _failed_spike_fraction(trace_v: np.ndarray, rate_hz: float,
 
     NaN if no initiations detected (so we don't conflate "quiescent sweep" with "all failed").
     """
-    if len(trace_v) < 3 or rate_hz <= 0:
+    n_init, n_ok = _detect_spike_initiations(
+        trace_v, rate_hz, slope_thresh_mv_per_ms=slope_thresh_mv_per_ms,
+        window_ms=window_ms)
+    if n_init == 0:
         return float("nan")
-    dt_ms = 1000.0 / rate_hz
-    dvdt = np.gradient(trace_v * 1000.0) / dt_ms  # mV/ms
-    rising = dvdt > slope_thresh_mv_per_ms
-    # Initiations = first sample of each rising run
-    starts = np.where(rising[1:] & ~rising[:-1])[0] + 1
-    if len(starts) == 0:
-        return float("nan")
-    win = int(max(1, window_ms * rate_hz / 1000.0))
-    failed = 0
-    for s in starts:
-        peak_window = trace_v[s : min(len(trace_v), s + win)]
-        if len(peak_window) == 0:
-            continue
-        if np.max(peak_window) < 0.0:   # never reaches 0 V (= 0 mV)
-            failed += 1
-    return float(failed) / float(len(starts))
+    return float(n_init - n_ok) / float(n_init)
+
+
+def _count_successful_spikes(trace_v: np.ndarray, rate_hz: float) -> int:
+    """Successful AP count per sweep (initiations that reach ≥ 0 mV)."""
+    _n_init, n_ok = _detect_spike_initiations(trace_v, rate_hz)
+    return n_ok
 
 
 def _ap_amplitude_cv(trace_v: np.ndarray, rate_hz: float, min_aps: int = 5) -> float:
@@ -679,7 +718,8 @@ def _filter_before(stream: list, cutoff_idx: int | None,
 
 
 def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
-                      *, use_efel: bool = True, trim_bad_ending: bool = True) -> dict[str, Any]:
+                      *, use_efel: bool = True, trim_bad_ending: bool = True,
+                      force_trim_at: int | None = None) -> dict[str, Any]:
     """Open one NWB, compute per-cell QC metrics, return a flat dict.
 
     Always returns a row even when computations fail — failure modes show up as
@@ -690,6 +730,10 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
     computed from the IV-protocol slope; holding current is surfaced. When the
     paired stimulus is absent, Rs falls back to the legacy 50 pA assumption
     (and the per-cell `n_rs_fallback` count is incremented).
+
+    `force_trim_at` (v0.7.0): if set, bypass bad-ending detection and trim every
+    accumulator at this voltage-sweep index. Used by the viewer's interactive
+    trim-override path. Set to 0 to keep every sweep (no trim).
     """
     out: dict[str, Any] = {
         # Core (v0.1.x)
@@ -726,6 +770,10 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
         "bad_ending_at_sweep": float("nan"),
         "n_sweeps_trimmed": 0,
         "bad_ending_reason": None,
+        # Total spike count across all AP-bearing sweeps (v0.7.0) — used as a
+        # headline figure in the viewer. Counts dV/dt initiations that reach ≥0 mV
+        # across ap_waveform + rest_firing sweeps.
+        "n_spikes_total": 0,
         # Experimenter-guidance additions (v0.5.0)
         # Vrest split: true Vrest (no holding current) vs held-Vm under Ihld
         "held_vm_mv": float("nan"),
@@ -773,6 +821,8 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
             edge_overshoots: list[tuple[float, int]] = []
             # Per-AP amplitudes for attenuation-fraction reduction
             per_ap_amplitudes: list[tuple[float, int]] = []
+            # Per-sweep successful-AP counts (ap_waveform + rest_firing)
+            spike_counts_per_sweep: list[tuple[int, int]] = []
             # Bookkeeping
             rs_fallback_used = 0
             efel_fallback_used = 0
@@ -866,6 +916,8 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
                         failure_fractions.append((f, sweep_idx))
+                    spike_counts_per_sweep.append(
+                        (_count_successful_spikes(trace, rate), sweep_idx))
                     li = _late_instability_index(trace, rate)
                     if not math.isnan(li):
                         late_instabilities.append((li, sweep_idx))
@@ -897,6 +949,8 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                     f = _failed_spike_fraction(trace, rate)
                     if not math.isnan(f):
                         failure_fractions.append((f, sweep_idx))
+                    spike_counts_per_sweep.append(
+                        (_count_successful_spikes(trace, rate), sweep_idx))
                     if use_efel:
                         cv, used_fb = _efel_or_fallback_ap_amplitude_cv(
                             trace, stim_a, rate,
@@ -928,8 +982,14 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
             vrest_seq = [(v, idx) for v, _name, idx in vrest_combined]
             rs_seq    = [(v, idx) for v, _name, idx in rs_estimates]
             ov_seq    = [(v, idx) for v, _name, idx in ap_overshoots]
-            cutoff_idx, reason = _detect_bad_ending(vrest_seq, rs_seq, ov_seq, n_total) \
-                                  if trim_bad_ending else (None, None)
+            if force_trim_at is not None and force_trim_at > 0 and force_trim_at < n_total:
+                # Manual override from viewer/CSV — bypass detection.
+                cutoff_idx, reason = int(force_trim_at), "manual_override"
+            elif force_trim_at == 0:
+                cutoff_idx, reason = None, None
+            else:
+                cutoff_idx, reason = _detect_bad_ending(vrest_seq, rs_seq, ov_seq, n_total) \
+                                      if trim_bad_ending else (None, None)
             if cutoff_idx is not None:
                 out["bad_ending_at_sweep"] = int(cutoff_idx)
                 out["bad_ending_reason"] = reason
@@ -953,6 +1013,7 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 ap_amp_cvs = _filter_before(ap_amp_cvs, cutoff_idx)
                 late_instabilities = _filter_before(late_instabilities, cutoff_idx)
                 per_ap_amplitudes = _filter_before(per_ap_amplitudes, cutoff_idx)
+                spike_counts_per_sweep = _filter_before(spike_counts_per_sweep, cutoff_idx)
 
             # Vrest source priority (v0.5.0): spontaneous_no_hold > spontaneous_held
             # > legacy spontaneous_hold. vrest_mv is the canonical TRUE resting
@@ -1070,6 +1131,8 @@ def compute_metrics(nwb_path: str | Path, family_map: StimulusFamilyMap,
                 out["late_instability_index"] = float(np.max([item[0] for item in late_instabilities]))
             if edge_overshoots:
                 out["test_pulse_edge_overshoot_mv"] = float(np.max([item[0] for item in edge_overshoots]))
+            if spike_counts_per_sweep:
+                out["n_spikes_total"] = int(sum(item[0] for item in spike_counts_per_sweep))
 
             # Coverage. v0.5.0: spontaneous_no_hold / spontaneous_held / legacy
             # spontaneous_hold all satisfy the "spontaneous" essential.

@@ -321,13 +321,15 @@ nwb-qc serve --config mydata_project.yaml
 
 This starts a localhost-only HTTP server (default port 8765) and opens your browser. The viewer reads the same `qc_report.csv` for the cell list and lazy-loads sweep data from the underlying NWB files only when you click — only the bytes you ask for are decoded.
 
-**Layout:**
+**Layout (v0.7.0):**
 
-- **Left** — `flag` cell list (pass/fail rows aren't surfaced here — the canonical record is `qc_report.csv`), filterable by `cell_id`.
-- **Centre-left** — **sweep grid**: every voltage acquisition in the selected cell's NWB rendered as a small lazy-loaded thumbnail (~220×70 px), grouped by stimulus family. Implicated-family sweeps get a ⚠ badge and a yellow border; non-implicated sweeps are dimmed. A toggle above the grid switches between **"implicated only"** (default — matches what the triggered metrics actually point to) and **"all sweeps"** (the full ~100–200 sweeps per NWB).
-- **Right** — 2 × 2 grid of plot panels. Click a sweep tile to drop the full-resolution trace into the next free slot; click "×" on a panel to clear it.
+- **Left** — non-pass cell list (flag + fail), filterable by `cell_id`, sorted flag-first then fail. Cells whose recordings were auto-trimmed by bad-ending detection show a ✂ marker.
+- **Centre** — **single overlay canvas**: every sweep of the selected cell drawn on shared axes (time s × mV), coloured per family. Within a family, sweeps fade from darker to lighter by chronological index so the session progression is visible.
+  - Above the canvas is a row of **family toggle pills** (one per family present in the NWB, with a colored swatch and sweep count). Click a pill to hide/show that family's sweeps in the overlay — instant, no re-fetch.
+  - A **trim slider** sits between the pills and the canvas. Drag it to set a manual cutoff: sweeps past the slider go gray in the canvas, and the headline metrics on the right re-derive live via `/api/recompute_cell` (debounced 300 ms). The "save trim" button persists the cutoff to `qc_trim_overrides.csv` so the next `nwb-qc run` honors it.
+- **Right** — **headline metrics panel**: eight key signals (RMP, RMP drift, baseline noise, input resistance, detected spikes, max depolarization, clipping fraction, Ephys QC composite) coloured green/yellow/red by their current threshold rule. Each editable row has a pencil icon: click it to edit `fail_above` / `flag_above` / `fail_below` / `flag_below` / boolean rules. Saving writes to `threshold_overrides.yaml` in `output_dir` (layered on top of `thresholds_file` at the next `nwb-qc run`) and the panel re-colors instantly. Below the headline panel is a collapsed **Cell metadata** section that exposes the full per-cell field set for power users.
 
-Thumbnails are rendered **on demand server-side** when a tile scrolls into view (IntersectionObserver). The pipeline doesn't pre-generate them — first hit per `(cell, sweep)` opens the NWB, decimates via LTTB, and caches the PNG both in memory (LRU of 256) and on disk under `qc_output_*/traces/viewer/`. The second visit to the same cell is instant. Full-resolution Canvas plots use the existing `/api/trace` endpoint and the LRU-cached NWB handles, so the four default panel fetches after a cell click open the NWB once.
+Sweep traces are LTTB-decimated to 1500 points per fetch and cached in the browser, so toggling a family on/off is a redraw, not a re-fetch. The NWB-handle LRU keeps a session's worth of cells warm on the server side.
 
 **Deep-linking:** the static report's per-cell "Inspect all sweeps →" link uses `?cell=<cell_id>` — the viewer auto-selects that cell on load. Use this to keep the cohort triage flow tight: static report for the at-a-glance verdict + the 3-stacked thumbnail, viewer for any-sweep depth.
 
@@ -340,7 +342,19 @@ curl http://127.0.0.1:8765/api/sweeps/<cell_id>
 curl 'http://127.0.0.1:8765/api/trace/<cell_id>/<sweep_idx>?max_points=1000'
 curl -o sweep_005.png 'http://127.0.0.1:8765/api/thumb/<cell_id>/5?w=220&h=100'
 curl http://127.0.0.1:8765/api/families
+# v0.7.0 — edits:
+curl http://127.0.0.1:8765/api/thresholds                                               # GET merged + overrides
+curl -X POST -H 'Content-Type: application/json' -d '{"overrides":{"vrest_mv":{"fail_below":-95}}}' \
+  http://127.0.0.1:8765/api/thresholds                                                  # save overrides
+curl -X POST -H 'Content-Type: application/json' -d '{"trim_at_sweep": 12}' \
+  http://127.0.0.1:8765/api/recompute_cell/<cell_id>                                    # live-recompute one cell
+curl -X POST -H 'Content-Type: application/json' -d '{"cell_id":"<cell_id>","trim_at_sweep":12}' \
+  http://127.0.0.1:8765/api/trim                                                        # persist a trim override
 ```
+
+**Where the edits live:**
+- `threshold_overrides.yaml` in `output_dir/` — same shape as `thresholds_file` (wrapped in `metrics:`). Per-metric rules in this file *replace* the base rule wholesale. Delete the file or empty its `metrics:` block to revert.
+- `qc_trim_overrides.csv` in `output_dir/` — columns `nwb_sha256, trim_at_sweep, note, reviewer, date`. `trim_at_sweep=0` means "no trim, keep all sweeps" (override the auto-detector). Any sha listed here is forced to re-compute on the next `nwb-qc run` so the cached row reflects the new cutoff.
 
 **Flags:** `--port N` to change the port, `--no-browser` to skip auto-opening, `--host 0.0.0.0` to make the viewer reachable from other machines on your network (see *Sharing the viewer over a network* below).
 

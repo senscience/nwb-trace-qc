@@ -2,93 +2,131 @@
 <html><head><meta charset="utf-8"/>
 <title>{{PROJECT}} — interactive trace viewer</title>
 <style>
-  body { font-family: -apple-system, sans-serif; margin: 0; color: #222; background: #fafbfc; }
-  header { background: #1b2228; color: #fff; padding: .5rem 1rem; display: flex; align-items: center; gap: 1rem; }
-  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
-  header .meta { color: #aaa; font-size: .8rem; }
-  header .count { color: #ffe18a; font-size: .8rem; margin-left: auto; }
-  main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 42px); }
-  #left { background: #fff; border-right: 1px solid #e0e0e0; overflow-y: auto; }
-  #left .filter { padding: .5rem; border-bottom: 1px solid #eee; position: sticky; top: 0; background: #fff; z-index: 2; }
-  #left input { width: 100%; padding: .3rem .4rem; border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box; }
+  :root {
+    --bg: #1a1d22; --panel: #23272d; --panel-2: #2c3138; --border: #353b45;
+    --text: #d8dde4; --muted: #8d949e; --accent: #6dd3a1; --warn: #f0c14a;
+    --danger: #f08c8c; --link: #7fb1ff;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; color: var(--text); background: var(--bg); }
+  header { background: #14171b; color: #fff; padding: .5rem 1rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  header .meta { color: #98a2af; font-size: .8rem; }
+  header .count { color: var(--warn); font-size: .8rem; margin-left: auto; }
+  main { display: grid; grid-template-columns: 300px 1fr; height: calc(100vh - 42px); }
+
+  /* Cell list */
+  #left { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; }
+  #left .filter { padding: .5rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index: 2; }
+  #left input { width: 100%; padding: .35rem .45rem; border: 1px solid var(--border); border-radius: 3px; box-sizing: border-box; background: #1a1d22; color: var(--text); }
   #left ul { list-style: none; margin: 0; padding: 0; }
-  #left li { padding: .4rem .6rem; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: .85rem; }
-  #left li:hover { background: #f4f6f8; }
-  #left li.active { background: #e6f0ff; }
-  #left .verdict { display: inline-block; padding: 1px 5px; border-radius: 2px; font-size: .68rem; margin-right: .3rem; vertical-align: middle; }
-  #left .trim-marker { display: inline-block; background: #c89225; color: #fff; padding: 0 4px; border-radius: 2px; font-size: .65rem; margin-left: .15rem; cursor: help; }
-  .v-pass { background: #d4edda; color: #155724; }
-  .v-flag { background: #fff3cd; color: #856404; }
-  .v-fail { background: #f8d7da; color: #721c24; }
+  #left li { padding: .45rem .6rem; border-bottom: 1px solid #2a2e35; cursor: pointer; font-size: .85rem; }
+  #left li:hover { background: #2c3138; }
+  #left li.active { background: #314058; color: #e8eef5; }
+  .verdict { display: inline-block; padding: 1px 5px; border-radius: 2px; font-size: .68rem; margin-right: .3rem; vertical-align: middle; }
+  .v-pass { background: #2d4a3a; color: #b6e5c8; }
+  .v-flag { background: #4a3f28; color: #f0d595; }
+  .v-fail { background: #4a2d2d; color: #f4b6b6; }
+  .trim-marker { display: inline-block; background: #8d6428; color: #fff; padding: 0 4px; border-radius: 2px; font-size: .65rem; margin-left: .15rem; cursor: help; }
+
+  /* Right pane */
   #right { display: grid; grid-template-rows: auto auto 1fr; overflow: hidden; }
-  #cell-header { padding: .5rem 1rem; background: #fff; border-bottom: 1px solid #eee; font-size: .9rem; }
+  #trim-strip { background: #3b3120; color: #f0d595; padding: .6rem 1rem; border-bottom: 1px solid #5a4a28; font-size: .9rem; line-height: 1.4; }
+  #trim-strip .icon { font-size: 1.2rem; margin-right: .35rem; vertical-align: -0.05rem; }
+  #cell-header { padding: .5rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border); font-size: .9rem; }
   #cell-header .cell-id { font-weight: 600; font-size: 1rem; }
-  #cell-header .triggered { color: #666; font-size: .8rem; margin-top: .25rem; }
-  #cell-header .triggered .chip { display: inline-block; padding: 1px 6px; margin: 0 .15rem .15rem 0; border-radius: 2px; font-size: .72rem; }
-  #cell-header .triggered .chip-fail { background: #f8d7da; color: #721c24; font-weight: 600; }
-  #cell-header .triggered .chip-flag { background: #fff3cd; color: #856404; font-weight: 600; }
-  #cell-header .triggered .chip-advisory { opacity: 0.55; font-weight: normal; }
-  #cell-header .triggered details.advisory-fold { display: inline-block; }
-  #cell-header .triggered details.advisory-fold > summary { list-style: none; cursor: pointer; font-size: .68rem; color: #666; padding: 1px 5px; background: #f0f0f0; border-radius: 2px; border: 1px dashed #ccc; }
-  #cell-header .triggered details.advisory-fold > summary::-webkit-details-marker { display: none; }
-  #cell-header .implicated { color: #444; font-size: .8rem; margin-top: .2rem; }
-  #cell-header .fam-chip { display: inline-block; background: #fff3cd; color: #856404; padding: 1px 6px; border-radius: 2px; margin-right: .25rem; font-size: .72rem; font-weight: 600; }
-  /* Trim banner: prominent, top of the right pane, impossible to miss when present */
-  #trim-strip { background: #fff3cd; color: #856404; padding: .75rem 1rem; border-bottom: 2px solid #e0b54a; border-left: 6px solid #c89225; font-size: .92rem; line-height: 1.5; }
-  #trim-strip .icon { font-size: 1.3rem; margin-right: .35rem; vertical-align: -0.1rem; }
-  #trim-strip .where { font-weight: 700; }
-  #content { display: grid; grid-template-columns: 280px 1fr; min-height: 0; overflow: hidden; }
-  /* Sweep grid (left): tiles with lazy-loaded thumbnails */
-  #sweep-list { background: #fff; border-right: 1px solid #eee; overflow-y: auto; font-size: .75rem; padding: 0; }
-  #sweep-list .sweep-toolbar { position: sticky; top: 0; background: #fff; padding: .4rem .5rem; border-bottom: 1px solid #eee; z-index: 2; display: flex; align-items: center; gap: .4rem; }
-  #sweep-list .sweep-toolbar button { font-size: .7rem; padding: .15rem .4rem; border: 1px solid #ccc; background: #fff; border-radius: 3px; cursor: pointer; }
-  #sweep-list .sweep-toolbar button.active { background: #e6f0ff; border-color: #5a9ad6; color: #1c4f8b; font-weight: 600; }
-  #sweep-list .family { padding: .25rem .5rem; background: #f4f6f8; font-weight: 600; font-size: .72rem; color: #666; position: sticky; top: 34px; z-index: 1; }
-  #sweep-list .family.implicated { background: #fff8db; color: #856404; }
-  #sweep-list .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; padding: .25rem; }
-  .tile { position: relative; cursor: pointer; border: 1px solid #ddd; border-radius: 3px; background: #fff; padding: 2px; min-height: 70px; transition: border-color .1s, opacity .15s; }
-  .tile.implicated { border-color: #d6a76e; box-shadow: 0 0 0 1px #fff3cd inset; }
-  .tile.dimmed { opacity: 0.45; }
-  .tile.hidden { display: none; }
-  .tile:hover { border-color: #5a9ad6; }
-  .tile.selected { border-color: #1c4f8b; box-shadow: 0 0 0 2px #e6f0ff; }
-  .tile img { display: block; width: 100%; height: 60px; object-fit: fill; background: #fafbfc; }
-  .tile .lbl { font-size: .65rem; color: #444; margin-top: 2px; padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tile .badge { position: absolute; top: 1px; right: 2px; font-size: .65rem; color: #856404; }
-  /* Trimmed sweeps (idx ≥ bad_ending_at_sweep): excluded from the metric
-     reductions. Make them visually obvious so the user can SEE where the
-     recording went bad on the sweep timeline. */
-  .tile.trimmed { background: repeating-linear-gradient(45deg, #fff, #fff 6px, #fbe6e6 6px, #fbe6e6 12px); border-color: #c89225; opacity: 0.55; }
-  .tile.trimmed img { opacity: 0.45; filter: grayscale(0.5); }
-  .tile.trimmed .lbl { color: #856404; font-style: italic; }
-  .tile .trim-badge { position: absolute; top: 1px; right: 2px; background: #c89225; color: #fff; font-size: .58rem; font-weight: 700; padding: 1px 4px; border-radius: 2px; letter-spacing: 0.02em; }
-  /* Plot grid (right) */
-  #plots {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-auto-rows: minmax(180px, 240px);
-    gap: .5rem;
-    padding: .5rem;
-    background: #fafbfc;
-    overflow: auto;
-    align-content: start;
+  #cell-header .triggered { color: var(--muted); font-size: .8rem; margin-top: .25rem; }
+  #cell-header .chip { display: inline-block; padding: 1px 6px; margin: 0 .15rem .15rem 0; border-radius: 2px; font-size: .72rem; }
+  #cell-header .chip-fail { background: #4a2d2d; color: #f4b6b6; font-weight: 600; }
+  #cell-header .chip-flag { background: #4a3f28; color: #f0d595; font-weight: 600; }
+  #cell-header .chip-advisory { opacity: 0.55; font-weight: normal; }
+  #cell-header details.advisory-fold { display: inline-block; }
+  #cell-header details.advisory-fold > summary { list-style: none; cursor: pointer; font-size: .68rem; color: var(--muted); padding: 1px 5px; background: #2c3138; border-radius: 2px; border: 1px dashed var(--border); }
+  #cell-header details.advisory-fold > summary::-webkit-details-marker { display: none; }
+  #content { display: grid; grid-template-columns: 1fr 320px; min-height: 0; overflow: hidden; }
+
+  /* Plot area */
+  #plot-area { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; padding: .75rem 1rem; gap: .5rem; }
+  #family-toggles { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+  #family-toggles .label { color: var(--muted); font-size: .72rem; margin-right: .2rem; }
+  .fpill {
+    display: inline-flex; align-items: center; gap: .35rem; padding: 3px 8px;
+    border-radius: 999px; font-size: .72rem; cursor: pointer; user-select: none;
+    background: #2c3138; border: 1px solid var(--border); color: var(--text);
   }
-  .panel {
-    background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; padding: .4rem;
-    position: relative; height: 240px; max-height: 240px; box-sizing: border-box; overflow: hidden;
+  .fpill .swatch { width: 10px; height: 10px; border-radius: 999px; }
+  .fpill.off { opacity: 0.4; text-decoration: line-through; }
+  .fpill.implicated { border-color: var(--warn); box-shadow: 0 0 0 1px rgba(240,193,74,.2) inset; }
+  .fpill .cnt { color: var(--muted); font-size: .68rem; }
+
+  #trim-slider-wrap { display: flex; align-items: center; gap: .5rem; font-size: .75rem; color: var(--muted); }
+  #trim-slider { flex: 1; accent-color: var(--warn); }
+  #trim-slider-label { font-family: monospace; font-size: .75rem; min-width: 12rem; }
+  #trim-save { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 2px 8px; font-size: .72rem; border-radius: 3px; cursor: pointer; }
+  #trim-save:hover { border-color: var(--accent); color: var(--accent); }
+  #trim-save:disabled { opacity: .45; cursor: not-allowed; }
+
+  #overlay-wrap { background: #14171b; border: 1px solid var(--border); border-radius: 4px; padding: .5rem; min-height: 0; position: relative; }
+  #overlay-title { color: var(--muted); font-size: .75rem; font-weight: 600; text-align: center; margin-bottom: .25rem; }
+  #overlay { width: 100%; height: calc(100% - 1.25rem); display: block; cursor: grab; }
+  #overlay.panning { cursor: grabbing; }
+  #zoom-badge {
+    position: absolute; top: .5rem; right: .75rem; font-size: .68rem; font-family: monospace;
+    color: var(--muted); background: #0f1216; padding: 1px 6px; border-radius: 3px;
+    border: 1px solid var(--border); user-select: none;
   }
-  .panel.empty { border-style: dashed; color: #999; display: flex; align-items: center; justify-content: center; font-style: italic; }
-  .panel.loading { color: #888; display: flex; align-items: center; justify-content: center; font-style: italic; }
-  .panel .title { font-size: .75rem; font-weight: 600; margin-bottom: .25rem; color: #444; }
-  .panel .close { position: absolute; top: 4px; right: 6px; color: #999; cursor: pointer; font-size: .8rem; }
-  .panel .close:hover { color: #c00; }
-  .panel canvas { width: 100%; height: calc(100% - 20px); display: block; }
-  .empty-state { padding: 2rem; color: #666; text-align: center; }
+  #zoom-badge.zoomed { color: var(--warn); border-color: var(--warn); cursor: pointer; }
+  #zoom-badge.zoomed::after { content: ' · reset'; opacity: 0.7; }
+  #zoom-hint { position: absolute; bottom: .35rem; right: .75rem; font-size: .65rem; color: var(--muted); opacity: 0.55; font-family: monospace; user-select: none; }
+
+  /* Metrics panel */
+  #metrics-panel { background: var(--panel); border-left: 1px solid var(--border); padding: .75rem; overflow-y: auto; }
+  #metrics-panel h3 { font-size: .82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .5rem; }
+  .mrow { display: grid; grid-template-columns: 1fr auto auto; align-items: start; gap: .35rem; padding: .35rem 0; border-bottom: 1px solid #2a2e35; }
+  .mrow .name { font-size: .78rem; color: #b3bbc6; line-height: 1.25; }
+  .mrow .sub { color: var(--muted); font-size: .66rem; margin-top: 1px; font-family: monospace; }
+  .mrow .sub .why { color: var(--danger); }
+  .mrow .sub .why.flag { color: var(--warn); }
+  .mrow .sub .fam { color: #7a818d; }
+  .mrow .sub .prov { color: #6c727b; }
+  .mrow .val { font-family: monospace; font-size: .85rem; text-align: right; font-weight: 600; align-self: center; }
+  .mrow .val.v-pass { color: var(--accent); background: transparent; padding: 0; }
+  .mrow .val.v-flag { color: var(--warn); background: transparent; padding: 0; }
+  .mrow .val.v-fail { color: var(--danger); background: transparent; padding: 0; }
+  .mrow .val.v-none { color: var(--muted); }
+  .mrow .pencil { color: var(--muted); cursor: pointer; font-size: .85rem; padding: 0 .25rem; user-select: none; opacity: 0.5; align-self: center; }
+  .mrow .pencil:hover { opacity: 1; color: var(--link); }
+  .mrow .pencil.overridden { color: var(--warn); opacity: 1; }
+
+  #metadata-collapse { margin-top: 1rem; }
+  #metadata-collapse summary { cursor: pointer; font-size: .82rem; color: var(--muted); padding: .25rem 0; }
+  #metadata-collapse summary::-webkit-details-marker { color: var(--muted); }
+  #metadata-collapse table { width: 100%; border-collapse: collapse; font-size: .72rem; margin-top: .35rem; }
+  #metadata-collapse td { padding: 2px 6px; border-bottom: 1px solid #2a2e35; vertical-align: top; }
+  #metadata-collapse td.k { color: var(--muted); white-space: nowrap; }
+  #metadata-collapse td.v { font-family: monospace; word-break: break-all; }
+
+  /* Threshold edit modal */
+  .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; min-width: 360px; max-width: 480px; }
+  .modal h4 { margin: 0 0 .5rem; font-size: .95rem; color: var(--text); }
+  .modal .desc { color: var(--muted); font-size: .78rem; margin-bottom: .75rem; line-height: 1.4; }
+  .modal .row { display: grid; grid-template-columns: 110px 1fr; gap: .5rem; align-items: center; margin-bottom: .35rem; }
+  .modal label { font-size: .78rem; color: var(--muted); }
+  .modal input { background: #14171b; color: var(--text); border: 1px solid var(--border); padding: .3rem .4rem; font-size: .82rem; border-radius: 3px; font-family: monospace; }
+  .modal .actions { margin-top: 1rem; display: flex; gap: .5rem; justify-content: flex-end; }
+  .modal button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: .35rem .8rem; font-size: .82rem; border-radius: 3px; cursor: pointer; }
+  .modal button.primary { background: #2a4d3d; border-color: var(--accent); color: var(--accent); }
+  .modal button.primary:hover { background: #2f5746; }
+  .modal button.danger { color: var(--danger); border-color: #5a3434; }
+
+  .empty-state { padding: 2rem; color: var(--muted); text-align: center; font-style: italic; }
+  .toast { position: fixed; bottom: 1rem; right: 1rem; background: var(--panel-2); color: var(--text); padding: .5rem .8rem; border-left: 3px solid var(--accent); border-radius: 3px; font-size: .82rem; z-index: 200; }
+  .toast.err { border-left-color: var(--danger); }
 </style>
 </head><body>
 <header>
   <h1>{{PROJECT}} — interactive trace viewer</h1>
-  <span class="meta">non-pass cells (fail + flag) — click a cell, then any sweep tile</span>
+  <span class="meta">non-pass cells (fail + flag) — click a cell to inspect</span>
   <span class="count" id="flag-count">{{N_FLAG}} non-pass of {{N_TOTAL}} total</span>
 </header>
 <main>
@@ -102,13 +140,29 @@
     <div id="trim-strip" style="display:none"></div>
     <div id="cell-header"><span class="cell-id">select a cell on the left</span></div>
     <div id="content">
-      <aside id="sweep-list"></aside>
-      <div id="plots">
-        <div class="panel empty">slot 1</div>
-        <div class="panel empty">slot 2</div>
-        <div class="panel empty">slot 3</div>
-        <div class="panel empty">slot 4</div>
+      <div id="plot-area">
+        <div id="family-toggles"><span class="label">show sweeps:</span></div>
+        <div id="trim-slider-wrap" style="display:none">
+          <span>trim at sweep:</span>
+          <input type="range" id="trim-slider" min="0" max="0" step="1" value="0"/>
+          <span id="trim-slider-label"></span>
+          <button id="trim-save" title="persist this trim point to qc_trim_overrides.csv">save trim</button>
+        </div>
+        <div id="overlay-wrap">
+          <div id="overlay-title">ELECTROPHYSIOLOGY (SWEEP FAMILY)</div>
+          <span id="zoom-badge" title="scroll: zoom · drag: pan · dblclick: reset">100%</span>
+          <canvas id="overlay"></canvas>
+          <span id="zoom-hint">scroll = zoom · drag = pan · dblclick = reset</span>
+        </div>
       </div>
+      <aside id="metrics-panel">
+        <h3>Headline metrics</h3>
+        <div id="headline-metrics"></div>
+        <details id="metadata-collapse">
+          <summary>Cell metadata</summary>
+          <table id="metadata-table"></table>
+        </details>
+      </aside>
     </div>
   </section>
 </main>
@@ -120,401 +174,810 @@ const SKIP_KEYS = new Set([
   'override_note','override_reviewer','override_date',
   'computed_verdict_with_vision','vision_reason',
   'vision_verdict','vision_confidence','vision_notes',
+  'ephys_qc_score','vrest_mv_provenance','rs_mohm_provenance',
+  'ap_amp_overshoot_mv_provenance',
 ]);
+
+// Headline metrics shown in the right panel. Mapping screenshot → our fields.
+const HEADLINE = [
+  { key: 'vrest_mv',                 label: 'RMP (computed)',      unit: 'mV',  dp: 2 },
+  { key: 'vrest_drift_mv',           label: 'RMP drift / rundown', unit: 'mV',  dp: 2, signed: true },
+  { key: 'baseline_rms_mv',          label: 'Baseline noise',      unit: 'mV',  dp: 2 },
+  { key: 'rin_mohm',                 label: 'Input resistance',    unit: 'MΩ',  dp: 1 },
+  { key: 'n_spikes_total',           label: 'Detected spikes',     unit: '',    dp: 0 },
+  { key: 'ap_amp_overshoot_mv',      label: 'Max depolarization',  unit: 'mV',  dp: 2 },
+  { key: 'clipping_fraction',        label: 'Clipping fraction',   unit: '',    dp: 2, derived: true },
+  { key: 'ephys_qc_score',           label: 'Ephys QC (advisory)', unit: '',    dp: 2 },
+];
+
+// Distinct hues per family. Used both for the toggle pill swatch and the
+// overlay traces. Index by sorted family name for stability.
+const FAMILY_COLORS = {
+  'spontaneous_no_hold': '#8ec07c',
+  'spontaneous_held':    '#a3d977',
+  'test_pulse':          '#83a598',
+  'iv_subthreshold':     '#83b1d6',
+  'ap_waveform':         '#fabd2f',
+  'rest_firing':         '#f0c14a',
+  'threshold_search':    '#d3869b',
+  'other':               '#999999',
+};
+
 let CELLS = [];
 let activeCell = null;
-let sweepsCache = {};
+let sweepsCache = {};      // cellId -> sweep meta list
+let traceCache = {};       // `${cellId}/${idx}` -> {x_seconds, y_mv, name, rate_hz, n_samples}
+let familyEnabled = {};    // family -> bool (current cell only; reset on selectCell)
 let METRIC_TO_FAMILY = {};
-let showImplicatedOnly = true;     // user-requested default
-const slots = [null, null, null, null];
-let thumbObserver = null;          // IntersectionObserver for lazy thumb loading
+let THRESHOLDS = {};       // metric -> rules (merged)
+let THRESHOLD_OVERRIDES = {}; // metric -> rules (subset that's overridden)
+let CRITICAL_METRICS = new Set();
+let pendingTrim = null;    // last requested trim value (cleared on save)
+let originalCutoff = null; // bad_ending_at_sweep from the cohort report
+let nSweepsTotal = 0;
+// Pan/zoom state for the overlay canvas. null = "auto bounds from data".
+let viewport = null;             // {xMin, xMax, yMin, yMax}
+let autoBounds = null;           // last computed auto bounds; used to compute zoom%
+let lastDraw = null;             // {margin, innerW, innerH, w, h, xMin, xMax, yMin, yMax}
 
+function $(sel) { return document.querySelector(sel); }
+function familyColor(fam) { return FAMILY_COLORS[fam] || FAMILY_COLORS['other']; }
+function fmtVal(v, dp, signed) {
+  if (v === null || v === undefined || (typeof v === 'number' && !isFinite(v))) return '—';
+  const n = Number(v);
+  if (!isFinite(n)) return '—';
+  if (dp === 0) return String(Math.round(n));
+  let s = n.toFixed(dp);
+  if (signed && n > 0) s = '+' + s;
+  return s;
+}
+function toast(msg, isErr) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isErr ? ' err' : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2400);
+}
+
+// ─── Threshold evaluation (mirror of thresholds.evaluate_metric) ──
+function evalMetric(value, rules) {
+  if (!rules) return { verdict: 'pass', reason: null };
+  if (rules.fail_if_false && !value) return { verdict: 'fail', reason: 'missing' };
+  if (rules.fail_if_true && value) return { verdict: 'fail', reason: 'set_true' };
+  if (rules.flag_if_false && !value) return { verdict: 'flag', reason: 'missing' };
+  if (rules.flag_if_true && value) return { verdict: 'flag', reason: 'set_true' };
+  const v = Number(value);
+  if (value === null || value === undefined || !isFinite(v)) {
+    if (typeof value === 'boolean' || typeof value === 'string') return { verdict: 'pass', reason: null };
+    return { verdict: 'flag', reason: 'nan' };
+  }
+  if ('fail_above' in rules && v > rules.fail_above) return { verdict: 'fail', reason: `> ${rules.fail_above}` };
+  if ('fail_below' in rules && v < rules.fail_below) return { verdict: 'fail', reason: `< ${rules.fail_below}` };
+  if ('flag_above' in rules && v > rules.flag_above) return { verdict: 'flag', reason: `> ${rules.flag_above}` };
+  if ('flag_below' in rules && v < rules.flag_below) return { verdict: 'flag', reason: `< ${rules.flag_below}` };
+  return { verdict: 'pass', reason: null };
+}
+
+// ─── API calls ───────────────────────────────────────────────────
 async function loadFamilies() {
   try {
     const r = await fetch('/api/families');
     if (!r.ok) return;
     const body = await r.json();
     METRIC_TO_FAMILY = body.metric_to_family || {};
-  } catch (e) { /* viewer still works without it; just no filtering */ }
+  } catch (e) { /* viewer still works without it */ }
 }
-
-function implicatedFamiliesFor(row) {
-  if (!row || !row.triggered_metrics) return new Set();
-  const out = new Set();
-  for (const t of row.triggered_metrics) {
-    const m = (t && t.metric) || null;
-    const fam = m && METRIC_TO_FAMILY[m];
-    if (fam) out.add(fam);
-  }
-  return out;
+async function loadThresholds() {
+  try {
+    const r = await fetch('/api/thresholds');
+    if (!r.ok) return;
+    const body = await r.json();
+    THRESHOLDS = body.thresholds || {};
+    THRESHOLD_OVERRIDES = body.overrides || {};
+    CRITICAL_METRICS = new Set(body.critical_metrics || []);
+  } catch (e) {}
 }
-
 async function loadCells() {
   try {
     const r = await fetch('/api/cells');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const body = await r.json();
     CELLS = body.cells || [];
-    // Header: prefer the new split when present, fall back to legacy n_flag
-    // (which now actually means non-pass).
-    const nFail = body.n_fail_only;
-    const nFlag = body.n_flag_only;
-    const nAttention = body.n_attention ?? body.n_flag;
+    const nFail = body.n_fail_only, nFlag = body.n_flag_only, nAttention = body.n_attention ?? body.n_flag;
     if (typeof nFail === 'number' && typeof nFlag === 'number') {
-      document.getElementById('flag-count').textContent =
-        `${nFail} fail · ${nFlag} flag of ${body.n_total} total`;
+      $('#flag-count').textContent = `${nFail} fail · ${nFlag} flag of ${body.n_total} total`;
     } else {
-      document.getElementById('flag-count').textContent =
-        `${nAttention} non-pass of ${body.n_total} total`;
+      $('#flag-count').textContent = `${nAttention} non-pass of ${body.n_total} total`;
     }
   } catch (e) {
-    document.getElementById('cell-list').innerHTML = `<li class="empty-state">error loading cells: ${e}</li>`;
+    $('#cell-list').innerHTML = `<li class="empty-state">error loading cells: ${e}</li>`;
     return;
   }
   renderCellList();
-  // Deep link: ?cell=<id>
   const qs = new URLSearchParams(window.location.search);
   const wanted = qs.get('cell');
   if (wanted) selectCell(wanted);
 }
 
+// ─── Cell list ────────────────────────────────────────────────────
 function renderCellList() {
-  const q = document.getElementById('cell-filter').value.toLowerCase();
-  const ul = document.getElementById('cell-list');
+  const q = $('#cell-filter').value.toLowerCase();
+  const ul = $('#cell-list');
   ul.innerHTML = '';
   const filtered = CELLS.filter(c => !q || (c.cell_id||'').toLowerCase().includes(q));
-  // Server returns flag-first (borderline → human triage), then fail
-  // (clearly-bad → mostly exclude). JS-side sort preserves that order.
-  const rank = {flag: 0, fail: 1, pass: 2};
+  const rank = { flag: 0, fail: 1, pass: 2 };
   filtered.sort((a, b) => {
-    const ra = rank[a.final_verdict] ?? 3;
-    const rb = rank[b.final_verdict] ?? 3;
+    const ra = rank[a.final_verdict] ?? 3, rb = rank[b.final_verdict] ?? 3;
     return ra - rb || (a.cell_id||'').localeCompare(b.cell_id||'');
   });
   filtered.slice(0, 500).forEach(c => {
     const li = document.createElement('li');
     li.dataset.cellid = c.cell_id;
     if (activeCell === c.cell_id) li.classList.add('active');
-    // ✂ marker when the cell's recording was auto-trimmed by bad-ending
-    // detection — so you can scan the list and see which cells had degraded
-    // endings without clicking each one.
     const nTrim = Number(c.n_sweeps_trimmed || 0);
     const trimChip = nTrim > 0
-      ? ` <span class="trim-marker" title="trimmed ${nTrim} tail sweep${nTrim === 1 ? '' : 's'}${c.bad_ending_reason ? ' · ' + c.bad_ending_reason : ''}">✂</span>`
-      : '';
-    li.innerHTML = `<span class="verdict v-${c.final_verdict}">${(c.final_verdict||'').toUpperCase()}</span>${c.cell_id}${trimChip} <span style="color:#999;font-size:.72rem">(${c.dataset||''})</span>`;
+      ? ` <span class="trim-marker" title="trimmed ${nTrim} sweep${nTrim === 1 ? '' : 's'}${c.bad_ending_reason ? ' · ' + c.bad_ending_reason : ''}">✂</span>` : '';
+    li.innerHTML = `<span class="verdict v-${c.final_verdict}">${(c.final_verdict||'').toUpperCase()}</span>${c.cell_id}${trimChip} <span style="color:var(--muted);font-size:.72rem">(${c.dataset||''})</span>`;
     li.onclick = () => selectCell(c.cell_id);
     ul.appendChild(li);
   });
   if (filtered.length > 500) {
     const li = document.createElement('li');
-    li.style.color = '#999'; li.style.fontStyle = 'italic';
+    li.style.color = 'var(--muted)'; li.style.fontStyle = 'italic';
     li.textContent = `…and ${filtered.length - 500} more (refine search)`;
     ul.appendChild(li);
   }
-  if (!filtered.length) {
-    ul.innerHTML = '<li class="empty-state">no non-pass cells</li>';
-  }
+  if (!filtered.length) ul.innerHTML = '<li class="empty-state">no non-pass cells</li>';
 }
 
+// ─── Cell selection ───────────────────────────────────────────────
 async function selectCell(cellId) {
   activeCell = cellId;
   document.querySelectorAll('#cell-list li').forEach(li => li.classList.toggle('active', li.dataset.cellid === cellId));
   const row = CELLS.find(c => c.cell_id === cellId) || {};
-  const implicated = implicatedFamiliesFor(row);
-  const verdict = row.final_verdict || '';
-  // Tiered triggered chips: critical inline (eye-catching), advisory tucked
-  // behind a "+N advisory" toggle (matches the v0.6.0 report layout).
-  const items = Array.isArray(row.triggered_metrics) ? row.triggered_metrics : [];
-  const renderChip = (t, advisory) => {
-    const v = t.verdict || 'flag';
-    const fam = t.metric ? METRIC_TO_FAMILY[t.metric] : null;
-    const famTag = fam ? ` · ${fam}` : '';
-    const cls = `chip chip-${v}` + (advisory ? ' chip-advisory' : '');
-    return `<span class="${cls}">${t.metric} (${t.reason || t.verdict})${famTag}</span>`;
-  };
-  const critItems = items.filter(t => t.critical !== false);   // default critical
-  const advItems  = items.filter(t => t.critical === false);
-  const critHtml = critItems.map(t => renderChip(t, false)).join('');
-  const advHtml  = advItems.map(t => renderChip(t, true)).join('');
-  const triggeredBlock = items.length
-    ? (
-        critHtml +
-        (advItems.length
-          ? ` <details class='advisory-fold'><summary>+${advItems.length} advisory</summary>${advHtml}</details>`
-          : '')
-      )
-    : '<span style="color:#999">no rule triggers</span>';
+  renderCellHeader(row);
+  renderTrimBanner(row);
 
-  const famChips = [...implicated].sort().map(f => `<span class="fam-chip">${f}</span>`).join('');
-  const implLine = implicated.size
-    ? `<div class="implicated"><b>Inspect these families:</b> ${famChips}</div>`
-    : '';
-  document.querySelector('#cell-header').innerHTML =
-    `<span class="cell-id">${cellId}</span> <span style="color:#999;font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
-    `<div class="triggered">${triggeredBlock}</div>` +
-    implLine;
-
-  // Recording-trim BANNER (prominent — sits above the cell header). Surfaces
-  // when bad-ending detection trimmed the tail so the user knows the metrics
-  // reflect the pre-degradation window.
-  const trimEl = document.getElementById('trim-strip');
-  const nTrim = Number(row.n_sweeps_trimmed || 0);
-  const cutoff = row.bad_ending_at_sweep;
-  const total = row.n_sweeps_total;
-  if (nTrim > 0) {
-    const reason = row.bad_ending_reason ? ` <i>(${row.bad_ending_reason})</i>` : '';
-    const where = (cutoff !== undefined && cutoff !== null && !Number.isNaN(cutoff))
-      ? ` <span class="where">at sweep ${cutoff}${total ? '/' + total : ''}</span>`
-      : '';
-    trimEl.innerHTML =
-      `<span class="icon">⚠</span><b>Recording trimmed${where}</b>${reason}. ` +
-      `${nTrim} tail sweep${nTrim === 1 ? '' : 's'} excluded from the metric scalars — ` +
-      `the verdicts above reflect the pre-degradation period only.`;
-    trimEl.style.display = '';
-  } else {
-    trimEl.innerHTML = '';
-    trimEl.style.display = 'none';
-  }
-  for (let i = 0; i < 4; i++) showLoading(i);
-
+  // Load sweeps for this cell (cached)
   if (!sweepsCache[cellId]) {
     const r = await fetch(`/api/sweeps/${encodeURIComponent(cellId)}`);
     if (!r.ok) {
-      document.getElementById('sweep-list').innerHTML = `<div class="empty-state">error: ${r.status}</div>`;
-      for (let i = 0; i < 4; i++) clearSlot(i);
+      $('#overlay-wrap').innerHTML = `<div class="empty-state">error loading sweeps: ${r.status}</div>`;
       return;
     }
     sweepsCache[cellId] = await r.json();
   }
-  renderSweepGrid(implicated);
   const sweeps = sweepsCache[cellId];
-  // Auto-pick first sweep of up to 4 distinct *implicated* families if available,
-  // else fall back to any 4 distinct families.
-  const seen = new Set();
-  const picks = [];
-  for (const s of sweeps) {
-    const inImpl = !implicated.size || implicated.has(s.family);
-    if (inImpl && s.family && !seen.has(s.family) && picks.length < 4) {
-      picks.push(s); seen.add(s.family);
-    }
-  }
-  if (!picks.length) {
-    for (const s of sweeps) {
-      if (s.family && !seen.has(s.family) && picks.length < 4) {
-        picks.push(s); seen.add(s.family);
-      }
-    }
-  }
-  const tasks = [];
-  for (let i = 0; i < 4; i++) {
-    if (picks[i]) tasks.push(loadSweepIntoSlot(picks[i], i));
-    else clearSlot(i);
-  }
-  await Promise.all(tasks);
+  nSweepsTotal = sweeps.length;
+  originalCutoff = (typeof row.bad_ending_at_sweep === 'number' && !isNaN(row.bad_ending_at_sweep))
+                   ? row.bad_ending_at_sweep : null;
+  pendingTrim = null;
+  viewport = null;  // reset zoom when switching cells
+
+  // Reset family toggles — all on by default.
+  familyEnabled = {};
+  for (const s of sweeps) familyEnabled[s.family || 'other'] = true;
+  renderFamilyToggles(row);
+  renderTrimSlider();
+  renderHeadlineMetrics(row);
+  renderMetadataTable(row);
+
+  // Fetch all traces in parallel (with concurrency cap so we don't hammer)
+  await fetchTracesFor(cellId, sweeps.map(s => s.idx));
+  drawOverlay();
 }
 
-function renderSweepGrid(implicated) {
-  const sw = document.getElementById('sweep-list');
-  sw.innerHTML = '';
-  // Active cell's trim cutoff (NaN/None when no bad-ending was detected).
-  // Sweeps with idx >= cutoff were excluded from the metric reductions and
-  // are marked visually below so the user can see EXACTLY where the trim
-  // happened on the sweep timeline.
-  const row = CELLS.find(c => c.cell_id === activeCell) || {};
-  const cutoff = (typeof row.bad_ending_at_sweep === 'number'
-                   && !Number.isNaN(row.bad_ending_at_sweep))
-                 ? row.bad_ending_at_sweep : null;
-  const trimReason = row.bad_ending_reason || '';
+// ─── Cell header (verdict + triggered chips) ──────────────────────
+function renderCellHeader(row) {
+  const items = Array.isArray(row.triggered_metrics) ? row.triggered_metrics : [];
+  const renderChip = (t, advisory) => {
+    const v = t.verdict || 'flag';
+    const fam = t.metric ? METRIC_TO_FAMILY[t.metric] : null;
+    const cls = `chip chip-${v}` + (advisory ? ' chip-advisory' : '');
+    return `<span class="${cls}">${t.metric} (${t.reason || t.verdict})${fam ? ' · ' + fam : ''}</span>`;
+  };
+  const crit = items.filter(t => t.critical !== false);
+  const adv = items.filter(t => t.critical === false);
+  const block = items.length
+    ? crit.map(t => renderChip(t, false)).join('')
+      + (adv.length ? ` <details class="advisory-fold"><summary>+${adv.length} advisory</summary>${adv.map(t => renderChip(t, true)).join('')}</details>` : '')
+    : '<span style="color:var(--muted)">no rule triggers</span>';
+  const verdict = row.final_verdict || '';
+  $('#cell-header').innerHTML =
+    `<span class="cell-id">${row.cell_id || ''}</span> <span style="color:var(--muted);font-size:.8rem">· ${row.dataset||''} · <span class="verdict v-${verdict}">${verdict.toUpperCase()}</span></span>` +
+    `<div class="triggered">${block}</div>`;
+}
 
-  // Toolbar with implicated-only / all toggle
-  const toolbar = document.createElement('div');
-  toolbar.className = 'sweep-toolbar';
-  toolbar.innerHTML = `
-    <span style="font-size:.72rem;color:#666;">Show:</span>
-    <button data-mode="implicated" ${showImplicatedOnly ? 'class="active"' : ''}>implicated only</button>
-    <button data-mode="all" ${!showImplicatedOnly ? 'class="active"' : ''}>all sweeps</button>
-  `;
-  toolbar.querySelectorAll('button').forEach(btn => {
-    btn.onclick = () => {
-      showImplicatedOnly = btn.dataset.mode === 'implicated';
-      renderSweepGrid(implicated);
-    };
-  });
-  sw.appendChild(toolbar);
+function renderTrimBanner(row) {
+  const el = $('#trim-strip');
+  const nTrim = Number(row.n_sweeps_trimmed || 0);
+  if (nTrim > 0) {
+    const cutoff = row.bad_ending_at_sweep;
+    const where = (cutoff !== undefined && cutoff !== null && !isNaN(cutoff))
+      ? ` at sweep ${cutoff}${row.n_sweeps_total ? '/' + row.n_sweeps_total : ''}` : '';
+    el.innerHTML =
+      `<span class="icon">⚠</span><b>Recording trimmed${where}</b>${row.bad_ending_reason ? ' <i>('+row.bad_ending_reason+')</i>' : ''}. ` +
+      `${nTrim} sweep${nTrim === 1 ? '' : 's'} excluded — metrics reflect the pre-degradation period.`;
+    el.style.display = '';
+  } else {
+    el.innerHTML = ''; el.style.display = 'none';
+  }
+}
 
-  const byFamily = {};
+// ─── Family toggle pills ──────────────────────────────────────────
+function renderFamilyToggles(row) {
+  const wrap = $('#family-toggles');
+  wrap.innerHTML = '<span class="label">show sweeps:</span>';
+  const counts = {};
   for (const s of sweepsCache[activeCell] || []) {
     const f = s.family || 'other';
-    (byFamily[f] = byFamily[f] || []).push(s);
+    counts[f] = (counts[f] || 0) + 1;
   }
-  // Family ordering: implicated first, then alpha
-  const fams = Object.keys(byFamily).sort((a, b) => {
-    const ai = implicated.has(a) ? 0 : 1, bi = implicated.has(b) ? 0 : 1;
-    return ai !== bi ? ai - bi : a.localeCompare(b);
+  const implicated = new Set();
+  for (const t of (row.triggered_metrics || [])) {
+    const fam = t.metric && METRIC_TO_FAMILY[t.metric];
+    if (fam) implicated.add(fam);
+  }
+  // Implicated families come first, then alpha.
+  const fams = Object.keys(counts).sort((a, b) => {
+    const ia = implicated.has(a) ? 0 : 1, ib = implicated.has(b) ? 0 : 1;
+    return ia - ib || a.localeCompare(b);
   });
-  let anyShown = false;
   for (const fam of fams) {
-    const fSweeps = byFamily[fam];
-    const isImplicated = implicated.size === 0 || implicated.has(fam);
-    if (showImplicatedOnly && !isImplicated) continue;
-    anyShown = true;
-    const h = document.createElement('div');
-    h.className = 'family' + (implicated.has(fam) ? ' implicated' : '');
-    h.textContent = `${fam} (${fSweeps.length})`;
-    sw.appendChild(h);
-    const grid = document.createElement('div');
-    grid.className = 'grid';
-    fSweeps.forEach(s => {
-      const tile = document.createElement('div');
-      tile.className = 'tile';
-      if (implicated.has(s.family)) tile.classList.add('implicated');
-      if (implicated.size && !implicated.has(s.family)) tile.classList.add('dimmed');
-      const isTrimmed = (cutoff !== null && s.idx >= cutoff);
-      if (isTrimmed) tile.classList.add('trimmed');
-      tile.dataset.idx = s.idx;
-      tile.dataset.family = s.family || '';
-      const trimTip = isTrimmed
-        ? `title="trimmed (sweep ${s.idx} ≥ cutoff ${cutoff}${trimReason ? ' · ' + trimReason : ''})"`
-        : '';
-      tile.setAttribute('data-tip', isTrimmed ? `trimmed — excluded from metrics` : '');
-      tile.innerHTML = `
-        <img data-src="/api/thumb/${encodeURIComponent(activeCell)}/${s.idx}?w=220&h=70" alt="${s.stimulus_type} ${s.sweep_number}" loading="lazy" ${trimTip}/>
-        <div class="lbl">${s.stimulus_type} ${s.sweep_number}<span style="color:#999"> · ${s.duration_s.toFixed(2)}s</span></div>
-        ${isTrimmed ? '<span class="trim-badge" title="trimmed by bad-ending detection">✂ trimmed</span>' :
-                       (implicated.has(s.family) ? '<span class="badge">⚠</span>' : '')}
-      `;
-      tile.onclick = () => {
-        const slot = slots.findIndex(x => x === null);
-        loadSweepIntoSlot(s, slot >= 0 ? slot : 0);
-      };
-      grid.appendChild(tile);
-    });
-    sw.appendChild(grid);
+    const pill = document.createElement('span');
+    pill.className = 'fpill' + (implicated.has(fam) ? ' implicated' : '');
+    pill.dataset.fam = fam;
+    pill.innerHTML = `<span class="swatch" style="background:${familyColor(fam)}"></span>${fam} <span class="cnt">${counts[fam]}</span>`;
+    if (!familyEnabled[fam]) pill.classList.add('off');
+    pill.onclick = () => {
+      familyEnabled[fam] = !familyEnabled[fam];
+      pill.classList.toggle('off', !familyEnabled[fam]);
+      drawOverlay();
+    };
+    wrap.appendChild(pill);
   }
-  if (!anyShown) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    empty.innerHTML = (implicated.size === 0)
-      ? `no sweeps in this NWB`
-      : `no sweeps in the implicated families<br/><br/><b>⚠ Your <code>stimulus_protocols:</code> mapping may not cover this lab's protocol names.</b><br/>See the YAML's UNMAPPED block. Or click <a href="#" onclick="event.preventDefault();showImplicatedOnly=false;renderSweepGrid(new Set());">[show all sweeps]</a>.`;
-    sw.appendChild(empty);
-  }
-  attachLazyThumbObserver();
-  highlightSelectedSweeps();
 }
 
-function attachLazyThumbObserver() {
-  if (thumbObserver) thumbObserver.disconnect();
-  thumbObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const img = entry.target;
-      if (img.dataset.src && !img.src) {
-        img.src = img.dataset.src;
-      }
-      thumbObserver.unobserve(img);
+// ─── Trim slider ──────────────────────────────────────────────────
+function renderTrimSlider() {
+  const wrap = $('#trim-slider-wrap');
+  const slider = $('#trim-slider');
+  const label = $('#trim-slider-label');
+  const saveBtn = $('#trim-save');
+  if (!nSweepsTotal) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  slider.max = nSweepsTotal;
+  // 0 = no trim, else cutoff index
+  const initial = (originalCutoff !== null) ? originalCutoff : nSweepsTotal;
+  slider.value = initial;
+  pendingTrim = null;
+  function updateLabel(val) {
+    const v = Number(val);
+    if (v >= nSweepsTotal) label.textContent = `keep all ${nSweepsTotal}`;
+    else if (v === 0) label.textContent = `(0 — keep all)`;
+    else label.textContent = `cut at sweep ${v}/${nSweepsTotal} (drop ${nSweepsTotal - v})`;
+  }
+  updateLabel(slider.value);
+  saveBtn.disabled = true;
+  slider.oninput = () => {
+    updateLabel(slider.value);
+    pendingTrim = Number(slider.value);
+    saveBtn.disabled = false;
+    drawOverlay();   // recolor trimmed sweeps live
+    // Live recompute (debounced) so the headline metrics reflect the cutoff.
+    scheduleRecompute(pendingTrim);
+  };
+  saveBtn.onclick = async () => {
+    if (pendingTrim === null) return;
+    const trimVal = pendingTrim >= nSweepsTotal ? 0 : pendingTrim;   // slider=max means "no trim"
+    saveBtn.disabled = true;
+    try {
+      const r = await fetch('/api/trim', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cell_id: activeCell, trim_at_sweep: trimVal }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      toast(`trim override saved (sweep ${trimVal === 0 ? '— no trim' : trimVal})`);
+    } catch (e) {
+      toast('save failed: ' + e, true);
+      saveBtn.disabled = false;
     }
-  }, { root: document.getElementById('sweep-list'), rootMargin: '120px', threshold: 0.01 });
-  document.querySelectorAll('#sweep-list .tile img').forEach(img => thumbObserver.observe(img));
+  };
 }
 
-function highlightSelectedSweeps() {
-  document.querySelectorAll('#sweep-list .tile').forEach(el => {
-    const idx = parseInt(el.dataset.idx, 10);
-    el.classList.toggle('selected', slots.some(s => s && s.sweep_idx === idx));
-  });
+let _recomputeTimer = null;
+function scheduleRecompute(trimVal) {
+  clearTimeout(_recomputeTimer);
+  _recomputeTimer = setTimeout(async () => {
+    const v = (trimVal >= nSweepsTotal) ? 0 : trimVal;
+    try {
+      const r = await fetch(`/api/recompute_cell/${encodeURIComponent(activeCell)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trim_at_sweep: v }),
+      });
+      if (!r.ok) return;
+      const newMetrics = await r.json();
+      // Merge new metric values into the active row for live display.
+      const row = CELLS.find(c => c.cell_id === activeCell);
+      if (!row) return;
+      Object.assign(row, newMetrics);
+      renderHeadlineMetrics(row);
+      renderMetadataTable(row);
+      renderCellHeader(row);
+    } catch (e) { /* swallow; live preview is best-effort */ }
+  }, 300);
 }
 
-function showLoading(slotIdx) {
-  const panel = document.querySelectorAll('#plots .panel')[slotIdx];
-  panel.className = 'panel loading';
-  panel.innerHTML = `Loading sweep…`;
-}
-
-async function loadSweepIntoSlot(sweep, slotIdx) {
-  showLoading(slotIdx);
-  try {
-    const r = await fetch(`/api/trace/${encodeURIComponent(activeCell)}/${sweep.idx}?max_points=${MAX_POINTS}`);
-    if (!r.ok) { clearSlot(slotIdx); return; }
-    const data = await r.json();
-    slots[slotIdx] = { cell_id: activeCell, sweep_idx: sweep.idx, name: sweep.name, family: sweep.family };
-    highlightSelectedSweeps();
-    drawPanel(slotIdx, data, sweep);
-  } catch (e) {
-    const panel = document.querySelectorAll('#plots .panel')[slotIdx];
-    panel.className = 'panel empty';
-    panel.innerHTML = `error: ${e}`;
+// ─── Overlay canvas ───────────────────────────────────────────────
+async function fetchTracesFor(cellId, idxs) {
+  const missing = idxs.filter(i => !traceCache[`${cellId}/${i}`]);
+  const CONCURRENCY = 6;
+  for (let i = 0; i < missing.length; i += CONCURRENCY) {
+    const batch = missing.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async idx => {
+      try {
+        const r = await fetch(`/api/trace/${encodeURIComponent(cellId)}/${idx}?max_points=${MAX_POINTS}`);
+        if (r.ok) traceCache[`${cellId}/${idx}`] = await r.json();
+      } catch (e) {}
+    }));
   }
 }
 
-function clearSlot(slotIdx) {
-  slots[slotIdx] = null;
-  const panel = document.querySelectorAll('#plots .panel')[slotIdx];
-  panel.innerHTML = `slot ${slotIdx+1}`; panel.className = 'panel empty';
-  highlightSelectedSweeps();
-}
-
-function drawPanel(slotIdx, data, sweep) {
-  const panel = document.querySelectorAll('#plots .panel')[slotIdx];
-  panel.className = 'panel';
-  panel.innerHTML = `<div class="title">${sweep.family ? '['+sweep.family+'] ' : ''}${data.name}</div><span class="close" title="clear">×</span><canvas></canvas>`;
-  panel.querySelector('.close').onclick = () => clearSlot(slotIdx);
-  const canvas = panel.querySelector('canvas');
-  const w = canvas.clientWidth, h = canvas.clientHeight;
+function drawOverlay() {
+  const canvas = $('#overlay');
+  const sweeps = sweepsCache[activeCell] || [];
+  if (!sweeps.length) return;
+  // Canvas backing-store size is owned by sizeOverlayCanvas() / ResizeObserver.
+  // Reading clientHeight on every draw and writing back to canvas.height
+  // creeps the canvas smaller on each call (a known grid-layout pitfall —
+  // setting the intrinsic dimensions feeds back into min-content sizing).
+  // Here we only read what's already there and reset the transform fresh.
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = w*dpr; canvas.height = h*dpr;
+  if (!canvas.width || !canvas.height) sizeOverlayCanvas();
+  const w = canvas.width / dpr, h = canvas.height / dpr;
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  const xs = data.x_seconds, ys = data.y_mv;
-  if (!xs.length) return;
-  const xMin = xs[0], xMax = xs[xs.length-1];
-  let yMin = Infinity, yMax = -Infinity;
-  for (const v of ys) { if (v<yMin) yMin=v; if (v>yMax) yMax=v; }
-  const pad = (yMax-yMin) * 0.08 || 1;
-  yMin -= pad; yMax += pad;
-  const margin = {l: 35, r: 8, t: 4, b: 18};
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  // Determine effective trim cutoff. pendingTrim takes precedence; else the
+  // original cohort cutoff. nSweepsTotal means "no trim".
+  const cutoff = (pendingTrim !== null && pendingTrim < nSweepsTotal) ? pendingTrim
+               : (pendingTrim !== null ? null
+                  : (originalCutoff !== null && originalCutoff < nSweepsTotal ? originalCutoff : null));
+
+  // Gather enabled traces; compute global y range.
+  const enabled = sweeps.filter(s => familyEnabled[s.family || 'other']);
+  const traces = enabled
+    .map(s => ({ sweep: s, data: traceCache[`${activeCell}/${s.idx}`] }))
+    .filter(t => t.data && t.data.x_seconds && t.data.x_seconds.length);
+  if (!traces.length) {
+    ctx.fillStyle = '#666'; ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('no sweeps enabled', w/2, h/2);
+    return;
+  }
+  let yMinA = Infinity, yMaxA = -Infinity, xMinA = Infinity, xMaxA = 0;
+  for (const t of traces) {
+    for (const v of t.data.y_mv) { if (v < yMinA) yMinA = v; if (v > yMaxA) yMaxA = v; }
+    const xs = t.data.x_seconds;
+    if (xs.length) {
+      if (xs[0] < xMinA) xMinA = xs[0];
+      if (xs[xs.length - 1] > xMaxA) xMaxA = xs[xs.length - 1];
+    }
+  }
+  if (yMinA === Infinity) return;
+  if (xMinA === Infinity) xMinA = 0;
+  const yPadA = Math.max(2, (yMaxA - yMinA) * 0.05);
+  autoBounds = { xMin: xMinA, xMax: xMaxA, yMin: yMinA - yPadA, yMax: yMaxA + yPadA };
+  const xMin = viewport ? viewport.xMin : autoBounds.xMin;
+  const xMax = viewport ? viewport.xMax : autoBounds.xMax;
+  const yMin = viewport ? viewport.yMin : autoBounds.yMin;
+  const yMax = viewport ? viewport.yMax : autoBounds.yMax;
+
+  // Axes
+  const margin = { l: 42, r: 10, t: 6, b: 22 };
   const innerW = w - margin.l - margin.r, innerH = h - margin.t - margin.b;
-  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
+  ctx.strokeStyle = '#3a3f48'; ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(margin.l, margin.t); ctx.lineTo(margin.l, margin.t + innerH);
   ctx.lineTo(margin.l + innerW, margin.t + innerH); ctx.stroke();
-  if (yMin < 0 && yMax > 0) {
-    const y0 = margin.t + innerH * (1 - (0 - yMin) / (yMax - yMin));
-    ctx.strokeStyle = '#cce'; ctx.setLineDash([3,3]);
-    ctx.beginPath(); ctx.moveTo(margin.l, y0); ctx.lineTo(margin.l + innerW, y0); ctx.stroke();
-    ctx.setLineDash([]);
+  // Clip subsequent drawing to the plot area so panned-out traces don't bleed
+  // into the axis labels.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(margin.l, margin.t, innerW, innerH); ctx.clip();
+
+  // Gridlines + Y ticks — choose step based on the visible Y range so zoom feels
+  // continuous (10 mV / 5 mV / 2 mV / 1 mV / 0.5 mV / 0.1 mV).
+  const ySpan = yMax - yMin;
+  const yStepCandidates = [100, 50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1];
+  const yStep = yStepCandidates.find(s => ySpan / s >= 3 && ySpan / s <= 10) || 10;
+  ctx.strokeStyle = '#262a31';
+  const yStart = Math.ceil(yMin / yStep) * yStep;
+  for (let yT = yStart; yT <= yMax; yT += yStep) {
+    const y = margin.t + innerH * (1 - (yT - yMin) / (yMax - yMin));
+    ctx.beginPath(); ctx.moveTo(margin.l, y); ctx.lineTo(margin.l + innerW, y); ctx.stroke();
   }
-  ctx.strokeStyle = '#222'; ctx.lineWidth = 0.8;
-  ctx.beginPath();
-  for (let i = 0; i < xs.length; i++) {
-    const x = margin.l + innerW * (xs[i] - xMin) / (xMax - xMin || 1);
-    const y = margin.t + innerH * (1 - (ys[i] - yMin) / (yMax - yMin || 1));
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  ctx.restore();
+  // Y tick labels (outside the clipped region)
+  ctx.fillStyle = '#7a818d'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
+  for (let yT = yStart; yT <= yMax; yT += yStep) {
+    const y = margin.t + innerH * (1 - (yT - yMin) / (yMax - yMin));
+    ctx.fillText((Math.abs(yT) < 1 ? yT.toFixed(1) : yT.toFixed(0)) + 'mV', margin.l - 4, y + 3);
   }
-  ctx.stroke();
-  ctx.fillStyle = '#666'; ctx.font = '10px monospace';
-  ctx.textAlign = 'right'; ctx.fillText(yMax.toFixed(0)+'mV', margin.l-3, margin.t+9);
-  ctx.fillText(yMin.toFixed(0)+'mV', margin.l-3, margin.t+innerH);
+
+  // X ticks — step adapts to visible window
   ctx.textAlign = 'center';
-  ctx.fillText(xMin.toFixed(2)+'s', margin.l, margin.t+innerH+12);
-  ctx.fillText(xMax.toFixed(2)+'s', margin.l+innerW, margin.t+innerH+12);
+  const xSpan = xMax - xMin;
+  const xStepCandidates = [5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+  const xStep = xStepCandidates.find(s => xSpan / s >= 3 && xSpan / s <= 10) || 1;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(margin.l, margin.t, innerW, innerH); ctx.clip();
+  ctx.strokeStyle = '#22262c';
+  const xStart = Math.ceil(xMin / xStep) * xStep;
+  for (let xT = xStart; xT <= xMax + 1e-9; xT += xStep) {
+    const x = margin.l + innerW * (xT - xMin) / (xMax - xMin);
+    ctx.beginPath(); ctx.moveTo(x, margin.t); ctx.lineTo(x, margin.t + innerH); ctx.stroke();
+  }
+  ctx.restore();
+  ctx.fillStyle = '#7a818d';
+  const xDP = xStep < 1 ? (xStep < 0.1 ? 2 : 1) : 0;
+  for (let xT = xStart; xT <= xMax + 1e-9; xT += xStep) {
+    const x = margin.l + innerW * (xT - xMin) / (xMax - xMin);
+    ctx.fillText(xT.toFixed(xDP) + 's', x, margin.t + innerH + 12);
+  }
+
+  // Per-family color luminance ramp by chronological sweep index within the family.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(margin.l, margin.t, innerW, innerH); ctx.clip();
+  const byFam = {};
+  for (const t of traces) {
+    const f = t.sweep.family || 'other';
+    (byFam[f] = byFam[f] || []).push(t);
+  }
+  for (const fam of Object.keys(byFam)) {
+    const list = byFam[fam].sort((a, b) => a.sweep.idx - b.sweep.idx);
+    const baseRGB = hexToRgb(familyColor(fam));
+    list.forEach((t, i) => {
+      // Luminance ramp: 0.6→1.0 across the family.
+      const k = list.length > 1 ? (0.55 + 0.45 * (i / (list.length - 1))) : 1.0;
+      const trimmed = (cutoff !== null && t.sweep.idx >= cutoff);
+      let r, g, b, alpha;
+      if (trimmed) { r = 120; g = 120; b = 120; alpha = 0.35; }
+      else { r = Math.round(baseRGB.r * k); g = Math.round(baseRGB.g * k); b = Math.round(baseRGB.b * k); alpha = 0.85; }
+      ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.lineWidth = trimmed ? 0.7 : 0.9;
+      ctx.beginPath();
+      const xs = t.data.x_seconds, ys = t.data.y_mv;
+      for (let j = 0; j < xs.length; j++) {
+        const x = margin.l + innerW * (xs[j] - xMin) / (xMax - xMin);
+        const y = margin.t + innerH * (1 - (ys[j] - yMin) / (yMax - yMin));
+        if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    });
+  }
+  ctx.restore();
+  lastDraw = { margin, innerW, innerH, w, h, xMin, xMax, yMin, yMax };
+  updateZoomBadge();
 }
 
-document.getElementById('cell-filter').addEventListener('input', renderCellList);
-let _resizeTimer = null;
-window.addEventListener('resize', () => {
-  clearTimeout(_resizeTimer);
-  _resizeTimer = setTimeout(() => {
-    slots.forEach((s, i) => {
-      if (s) {
-        fetch(`/api/trace/${encodeURIComponent(s.cell_id)}/${s.sweep_idx}?max_points=${MAX_POINTS}`)
-          .then(r => r.json()).then(d => drawPanel(i, d, s));
+function updateZoomBadge() {
+  const badge = $('#zoom-badge');
+  if (!badge || !autoBounds || !lastDraw) return;
+  const autoSpan = (autoBounds.xMax - autoBounds.xMin) * (autoBounds.yMax - autoBounds.yMin);
+  const cur = (lastDraw.xMax - lastDraw.xMin) * (lastDraw.yMax - lastDraw.yMin);
+  if (!viewport || !isFinite(autoSpan) || autoSpan <= 0) {
+    badge.textContent = '100%';
+    badge.classList.remove('zoomed');
+    return;
+  }
+  const pct = Math.round((autoSpan / cur) * 100);
+  badge.textContent = pct + '%';
+  badge.classList.add('zoomed');
+}
+
+// ─── Pan/zoom on the overlay canvas ───────────────────────────────
+function pixelToData(px, py) {
+  if (!lastDraw) return null;
+  const { margin, innerW, innerH, xMin, xMax, yMin, yMax } = lastDraw;
+  const fx = (px - margin.l) / innerW;
+  const fy = (py - margin.t) / innerH;
+  return {
+    x: xMin + fx * (xMax - xMin),
+    y: yMax - fy * (yMax - yMin),
+  };
+}
+function getMousePos(e) {
+  const canvas = $('#overlay');
+  const rect = canvas.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+function sizeOverlayCanvas() {
+  const canvas = $('#overlay');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+  const dpr = window.devicePixelRatio || 1;
+  const want_w = Math.max(1, Math.round(rect.width * dpr));
+  const want_h = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== want_w || canvas.height !== want_h) {
+    canvas.width = want_w;
+    canvas.height = want_h;
+  }
+}
+
+function setupOverlayInteraction() {
+  const canvas = $('#overlay');
+  if (!canvas || canvas.dataset.interactionsBound) return;
+  canvas.dataset.interactionsBound = '1';
+  // ResizeObserver drives canvas resizing — only when the display box
+  // actually changes. Prevents the drawOverlay-shrinks-on-every-redraw bug.
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(() => {
+      sizeOverlayCanvas();
+      if (activeCell) drawOverlay();
+    }).observe(canvas);
+  }
+  sizeOverlayCanvas();
+
+  canvas.addEventListener('wheel', (e) => {
+    if (!lastDraw || !autoBounds) return;
+    e.preventDefault();
+    const m = getMousePos(e);
+    // If the cursor is outside the plot area, still zoom but center on it.
+    const dataPos = pixelToData(m.x, m.y);
+    if (!dataPos) return;
+    const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
+    const b = viewport || { ...autoBounds };
+    const newXMin = dataPos.x - (dataPos.x - b.xMin) * factor;
+    const newXMax = dataPos.x + (b.xMax - dataPos.x) * factor;
+    const newYMin = dataPos.y - (dataPos.y - b.yMin) * factor;
+    const newYMax = dataPos.y + (b.yMax - dataPos.y) * factor;
+    // Refuse degenerate zoom (would collapse into a point)
+    if ((newXMax - newXMin) <= 1e-6 || (newYMax - newYMin) <= 1e-3) return;
+    viewport = { xMin: newXMin, xMax: newXMax, yMin: newYMin, yMax: newYMax };
+    drawOverlay();
+  }, { passive: false });
+
+  let panStart = null;
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (!lastDraw) return;
+    panStart = { mouse: getMousePos(e), vp: viewport ? { ...viewport } : { ...autoBounds } };
+    canvas.classList.add('panning');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!panStart || !lastDraw) return;
+    const cur = getMousePos(e);
+    const dxPx = cur.x - panStart.mouse.x, dyPx = cur.y - panStart.mouse.y;
+    const { innerW, innerH } = lastDraw;
+    const xSpan = panStart.vp.xMax - panStart.vp.xMin;
+    const ySpan = panStart.vp.yMax - panStart.vp.yMin;
+    const dx = -(dxPx / innerW) * xSpan;
+    const dy = (dyPx / innerH) * ySpan;
+    viewport = {
+      xMin: panStart.vp.xMin + dx, xMax: panStart.vp.xMax + dx,
+      yMin: panStart.vp.yMin + dy, yMax: panStart.vp.yMax + dy,
+    };
+    drawOverlay();
+  });
+  window.addEventListener('mouseup', () => {
+    if (panStart) { panStart = null; canvas.classList.remove('panning'); }
+  });
+  canvas.addEventListener('dblclick', () => {
+    viewport = null; drawOverlay();
+  });
+  $('#zoom-badge').addEventListener('click', () => {
+    if (viewport) { viewport = null; drawOverlay(); }
+  });
+}
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return { r: 153, g: 153, b: 153 };
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+// ─── Headline metrics panel ───────────────────────────────────────
+function deriveMetric(row, key) {
+  if (key === 'clipping_fraction') {
+    const c = Number(row.n_sweeps_clipped || 0);
+    const t = Number(row.n_sweeps_total || 0);
+    return t > 0 ? c / t : 0;
+  }
+  return row[key];
+}
+function metricVerdictClass(metric, value) {
+  if (metric === 'ephys_qc_score' || metric === 'clipping_fraction') {
+    if (value === null || value === undefined || !isFinite(Number(value))) return 'v-none';
+    const v = Number(value);
+    if (metric === 'ephys_qc_score') return v >= 0.85 ? 'v-pass' : v >= 0.5 ? 'v-flag' : 'v-fail';
+    if (metric === 'clipping_fraction') return v <= 0.01 ? 'v-pass' : v <= 0.05 ? 'v-flag' : 'v-fail';
+  }
+  if (value === null || value === undefined) return 'v-none';
+  const rules = THRESHOLDS[metric];
+  if (!rules) return 'v-none';
+  const ev = evalMetric(value, rules);
+  return ev.verdict === 'pass' ? 'v-pass' : ev.verdict === 'flag' ? 'v-flag' : 'v-fail';
+}
+// Stable family hints for derived/composite metrics that aren't in METRIC_TO_FAMILY.
+const FAMILY_HINTS = {
+  clipping_fraction: 'signal hygiene',
+  ephys_qc_score:    'composite · critical metrics',
+  n_spikes_total:    'ap_waveform + rest_firing',
+};
+
+function provenanceLine(row, key) {
+  const prov = row[key + '_provenance'];
+  if (!prov) return '';
+  let parsed = prov;
+  if (typeof prov === 'string') {
+    try { parsed = JSON.parse(prov); } catch (e) { return ''; }
+  }
+  if (!parsed || typeof parsed !== 'object') return '';
+  // Server emits `{first: {value, sweep_name}, last: {...}}` (provenance helpers in metrics.py).
+  const f = parsed.first && parsed.first.sweep_name;
+  const l = parsed.last && parsed.last.sweep_name;
+  if (f && l && f !== l) return `${f} → ${l}`;
+  return f || l || '';
+}
+
+function renderHeadlineMetrics(row) {
+  const el = $('#headline-metrics');
+  el.innerHTML = '';
+  // Build a triggered-by-metric map so each row can show its specific reason
+  // verbatim from the rule that fired.
+  const triggers = {};
+  for (const t of (row.triggered_metrics || [])) {
+    if (t && t.metric) triggers[t.metric] = t;
+  }
+  for (const m of HEADLINE) {
+    const value = deriveMetric(row, m.key);
+    const valCls = metricVerdictClass(m.key, value);
+    const valStr = (value === null || value === undefined || (typeof value === 'number' && !isFinite(value)))
+      ? '—' : (fmtVal(value, m.dp, m.signed) + (m.unit ? ' ' + m.unit : ''));
+    const overridden = !!THRESHOLD_OVERRIDES[m.key];
+    const editable = !m.derived && m.key !== 'ephys_qc_score' && m.key !== 'n_spikes_total';
+    const pencil = editable
+      ? `<span class="pencil${overridden ? ' overridden' : ''}" title="${overridden ? 'override active — click to edit' : 'edit thresholds'}" data-metric="${m.key}">✎</span>`
+      : '<span class="pencil" style="visibility:hidden">✎</span>';
+
+    // Family attribution — METRIC_TO_FAMILY (server-provided) covers real metrics;
+    // FAMILY_HINTS handles derived/composite rows.
+    const fam = METRIC_TO_FAMILY[m.key] || FAMILY_HINTS[m.key] || '';
+    // Why-failed — the exact rule that triggered, mirroring the report.
+    const trig = triggers[m.key];
+    const reason = trig ? (trig.reason || trig.verdict) : '';
+    const whyCls = trig && trig.verdict === 'fail' ? 'why' : (trig ? 'why flag' : '');
+    // Provenance sweeps (when present).
+    const prov = provenanceLine(row, m.key);
+
+    const subParts = [];
+    if (fam) subParts.push(`<span class="fam">${fam}</span>`);
+    if (reason) subParts.push(`<span class="${whyCls}">${trig.verdict}: ${reason}</span>`);
+    if (prov) subParts.push(`<span class="prov" title="sweep span feeding this metric">${prov}</span>`);
+    const sub = subParts.length ? `<div class="sub">${subParts.join(' · ')}</div>` : '';
+
+    el.insertAdjacentHTML('beforeend',
+      `<div class="mrow"><div class="name">${m.label}${sub}</div><span class="val ${valCls}">${valStr}</span>${pencil}</div>`);
+  }
+  el.querySelectorAll('.pencil[data-metric]').forEach(p => {
+    p.onclick = () => openThresholdEditor(p.dataset.metric);
+  });
+}
+
+function renderMetadataTable(row) {
+  const tbody = $('#metadata-table');
+  tbody.innerHTML = '';
+  const keys = Object.keys(row).filter(k => !SKIP_KEYS.has(k)).sort();
+  for (const k of keys) {
+    const v = row[k];
+    if (v === null || v === undefined || v === '') continue;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="k">${k}</td><td class="v">${typeof v === 'object' ? JSON.stringify(v) : v}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+// ─── Threshold editor modal ───────────────────────────────────────
+function openThresholdEditor(metric) {
+  const current = THRESHOLDS[metric] || {};
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  const keys = ['fail_above', 'fail_below', 'flag_above', 'flag_below'];
+  const boolKeys = ['fail_if_false', 'fail_if_true', 'flag_if_false', 'flag_if_true'];
+  const rows = keys.map(k => {
+    const v = current[k];
+    return `<div class="row"><label>${k}</label><input data-rk="${k}" value="${v ?? ''}" placeholder="(unset)"/></div>`;
+  }).join('') + boolKeys.map(k => {
+    const v = !!current[k];
+    return `<div class="row"><label>${k}</label><input data-rk="${k}" type="checkbox" ${v ? 'checked' : ''}/></div>`;
+  }).join('');
+  const isOverridden = !!THRESHOLD_OVERRIDES[metric];
+  back.innerHTML = `
+    <div class="modal">
+      <h4>Edit thresholds — ${metric}${CRITICAL_METRICS.has(metric) ? ' <span style="color:var(--warn);font-size:.7rem">CRITICAL</span>' : ''}</h4>
+      <div class="desc">Set a numeric bound or boolean rule. Empty fields are ignored. Saving writes to
+      <code>threshold_overrides.yaml</code> in the output directory; the next <code>nwb-qc run</code> picks them up automatically.</div>
+      ${rows}
+      <div class="actions">
+        ${isOverridden ? '<button class="danger" id="th-reset">remove override</button>' : ''}
+        <button id="th-cancel">cancel</button>
+        <button class="primary" id="th-save">save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(back);
+  back.querySelector('#th-cancel').onclick = () => back.remove();
+  back.querySelector('#th-save').onclick = async () => {
+    const rule = {};
+    back.querySelectorAll('input[data-rk]').forEach(inp => {
+      const k = inp.dataset.rk;
+      if (inp.type === 'checkbox') {
+        if (inp.checked) rule[k] = true;
+      } else {
+        const s = inp.value.trim();
+        if (s !== '' && !isNaN(Number(s))) rule[k] = Number(s);
       }
     });
+    // Merge with existing overrides, replacing this metric's rule wholesale.
+    const newOverrides = { ...THRESHOLD_OVERRIDES, [metric]: rule };
+    await saveThresholdOverrides(newOverrides);
+    back.remove();
+  };
+  const resetBtn = back.querySelector('#th-reset');
+  if (resetBtn) resetBtn.onclick = async () => {
+    const next = { ...THRESHOLD_OVERRIDES }; delete next[metric];
+    await saveThresholdOverrides(next);
+    back.remove();
+  };
+}
+
+async function saveThresholdOverrides(overrides) {
+  try {
+    const r = await fetch('/api/thresholds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overrides }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const body = await r.json();
+    THRESHOLD_OVERRIDES = overrides;
+    // Re-derive the merged map locally too so the next render uses fresh rules.
+    await loadThresholds();
+    if (Array.isArray(body.cells)) {
+      // Reconcile: keep object identity for refreshed rows when possible.
+      const byId = new Map(body.cells.map(c => [c.cell_id, c]));
+      for (let i = 0; i < CELLS.length; i++) {
+        const fresh = byId.get(CELLS[i].cell_id);
+        if (fresh) CELLS[i] = fresh;
+      }
+    }
+    const row = CELLS.find(c => c.cell_id === activeCell);
+    if (row) { renderHeadlineMetrics(row); renderCellHeader(row); }
+    renderCellList();
+    toast(`thresholds saved (${Object.keys(overrides).length} override${Object.keys(overrides).length === 1 ? '' : 's'})`);
+  } catch (e) { toast('save failed: ' + e, true); }
+}
+
+// ─── Wiring ───────────────────────────────────────────────────────
+$('#cell-filter').addEventListener('input', renderCellList);
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+  // ResizeObserver covers this in modern browsers; this is a fallback that
+  // also handles devicePixelRatio changes (e.g. dragging the window between
+  // monitors with different DPI).
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    sizeOverlayCanvas();
+    if (activeCell) drawOverlay();
   }, 200);
 });
 
-(async () => { await loadFamilies(); await loadCells(); })();
+setupOverlayInteraction();
+(async () => {
+  await loadFamilies();
+  await loadThresholds();
+  await loadCells();
+})();
 </script>
 </body></html>

@@ -52,6 +52,8 @@ CUSTOM_ALGORITHMS: dict[str, str] = {
                             "needs ≥3 Rac sweeps. Catches non-monotonic Rs instability that rs_drift_pct misses.",
     "qc_protocol_coverage": "Boolean — does the NWB carry ≥1 sweep in each essential family (spontaneous + test_pulse + ap_waveform).",
     "n_sweeps_total": "Count of voltage acquisitions iterated by the metric pass.",
+    "n_spikes_total": "Sum across ap_waveform + rest_firing sweeps of dV/dt-detected initiations "
+                       "that reach ≥ 0 mV (successful APs). Excludes trimmed sweeps.",
     "n_sweeps_clipped": "Sweeps that touched the voltage rails (±150 / +80 mV) for ≥1 ms.",
     "n_sweeps_nan": "Sweeps containing NaN samples.",
     "bad_ending_at_sweep": "First chronologically-ordered sweep index where the recording degraded "

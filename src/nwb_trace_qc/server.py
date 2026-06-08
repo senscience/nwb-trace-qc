@@ -40,9 +40,14 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from .config import ProjectConfig
-from .families import METRIC_TO_FAMILY, PSEUDO_METRIC_LABELS
+from .families import DEFAULT_CRITICAL_METRICS, METRIC_TO_FAMILY, PSEUDO_METRIC_LABELS
+from .metrics import compute_metrics
 from .nwb_io import is_zarr, nwb_sha256, open_nwb
+from .overrides import upsert_trim_override
 from .stimuli import StimulusFamilyMap
+from .thresholds import (
+    evaluate, load_thresholds_with_overrides, save_threshold_overrides,
+)
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +62,12 @@ _total_cells: int = 0
 _viewer_cells: list[dict[str, Any]] = []   # flag + fail rows (non-pass)
 _thumbnails_dir: Path | None = None
 _thumb_disk_cache_enabled: bool = True
+# v0.7.0 — config + override paths needed by the POST endpoints
+_cfg: ProjectConfig | None = None
+_thresholds_base_path: Path | None = None
+_threshold_overrides_path: Path | None = None
+_trim_overrides_path: Path | None = None
+_critical_metrics: set[str] = set()
 
 
 def _lttb(x: np.ndarray, y: np.ndarray, n_out: int) -> tuple[np.ndarray, np.ndarray]:
@@ -137,22 +148,33 @@ def _close_all_handles() -> None:
 _SWEEPS_BY_SHA: dict[str, list[dict[str, Any]]] = {}
 
 
+def _voltage_acqs_chrono(nwbfile) -> list[tuple[str, Any]]:
+    """Voltage acquisitions sorted by `starting_time` — keeps server-side sweep
+    indices aligned with metrics._iter_current_clamp_acqs so bad-ending cutoffs
+    and trace fetches refer to the same chronological position.
+    """
+    pairs: list[tuple[float, int, str, Any]] = []
+    for ins_idx, (name, obj) in enumerate(nwbfile.acquisition.items()):
+        unit = (getattr(obj, "unit", "") or "").lower()
+        if unit not in {"volts", "v", ""}:
+            continue
+        t = getattr(obj, "starting_time", None)
+        sort_t = float(t) if (t is not None and not (isinstance(t, float) and math.isnan(t))) else float("inf")
+        pairs.append((sort_t, ins_idx, name, obj))
+    pairs.sort(key=lambda p: (p[0], p[1]))
+    return [(name, obj) for _t, _i, name, obj in pairs]
+
+
 def _read_sweeps(nwb_path: Path, sha: str | None = None) -> list[dict[str, Any]]:
-    """Return one record per VOLTAGE acquisition. `idx` is the position in the
-    voltage-only sequence — matching both `_read_trace`'s indexing and the
-    `bad_ending_at_sweep` cutoff emitted by metrics.compute_metrics. Used to
-    be the all-acquisitions index (a latent bug when the NWB had non-voltage
-    channels in its acquisition container).
+    """Return one record per VOLTAGE acquisition in chronological order. `idx`
+    matches both `_read_trace`'s indexing and the `bad_ending_at_sweep` cutoff
+    emitted by metrics.compute_metrics.
     """
     if sha and sha in _SWEEPS_BY_SHA:
         return _SWEEPS_BY_SHA[sha]
     f = _get_handle(nwb_path)
     out: list[dict[str, Any]] = []
-    voltage_idx = 0
-    for name, obj in f.acquisition.items():
-        unit = (getattr(obj, "unit", "") or "").lower()
-        if unit not in {"volts", "v", ""}:
-            continue
+    for voltage_idx, (name, obj) in enumerate(_voltage_acqs_chrono(f)):
         rate = float(getattr(obj, "rate", 0) or 0)
         n_samp = int(obj.data.shape[0]) if obj.data.shape else 0
         duration_s = n_samp / rate if rate > 0 else 0.0
@@ -164,8 +186,8 @@ def _read_sweeps(nwb_path: Path, sha: str | None = None) -> list[dict[str, Any]]
             "idx": voltage_idx, "name": name, "family": fam, "stimulus_type": stim,
             "sweep_number": sweep_num, "n_samples": n_samp,
             "rate_hz": rate, "duration_s": round(duration_s, 4),
+            "starting_time": float(getattr(obj, "starting_time", 0) or 0),
         })
-        voltage_idx += 1
     if sha:
         _SWEEPS_BY_SHA[sha] = out
     return out
@@ -201,8 +223,7 @@ def _render_sweep_thumb(nwb_path: Path, sha: str, sweep_idx: int,
         return data
 
     f = _get_handle(nwb_path)
-    names = [(n, o) for n, o in f.acquisition.items()
-             if (getattr(o, "unit", "") or "").lower() in {"volts", "v", ""}]
+    names = _voltage_acqs_chrono(f)
     if sweep_idx < 0 or sweep_idx >= len(names):
         raise IndexError(f"sweep_idx {sweep_idx} out of range (have {len(names)})")
     name, obj = names[sweep_idx]
@@ -233,12 +254,7 @@ def _render_sweep_thumb(nwb_path: Path, sha: str, sweep_idx: int,
 
 def _read_trace(nwb_path: Path, sweep_idx: int, max_points: int) -> dict[str, Any]:
     f = _get_handle(nwb_path)
-    names = []
-    for name, obj in f.acquisition.items():
-        unit = (getattr(obj, "unit", "") or "").lower()
-        if unit not in {"volts", "v", ""}:
-            continue
-        names.append((name, obj))
+    names = _voltage_acqs_chrono(f)
     if sweep_idx < 0 or sweep_idx >= len(names):
         raise IndexError(f"sweep_idx {sweep_idx} out of range (have {len(names)})")
     name, obj = names[sweep_idx]
@@ -253,6 +269,101 @@ def _read_trace(nwb_path: Path, sweep_idx: int, max_points: int) -> dict[str, An
         "x_seconds": x_out.tolist(),
         "y_mv": (y_out * 1000.0).tolist(),
     }
+
+
+# ─── Threshold / verdict re-derivation helpers (v0.7.0) ─────────────
+
+def _load_current_thresholds() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(merged, overrides_only)`` for the configured threshold files.
+
+    Empty dict when no base thresholds file is configured — callers default to
+    the bundled rules elsewhere.
+    """
+    if _thresholds_base_path is None:
+        return {}, {}
+    return load_thresholds_with_overrides(
+        _thresholds_base_path, _threshold_overrides_path,
+    )
+
+
+def _reevaluate_all_cells() -> list[dict[str, Any]]:
+    """Re-run thresholds.evaluate over each in-memory cell row using the current
+    merged thresholds, mutating `_viewer_cells` in place (computed_verdict,
+    final_verdict if no override applied, triggered_metrics, ephys_qc_score).
+    Returns the refreshed list.
+    """
+    thresholds, _ = _load_current_thresholds()
+    if not thresholds:
+        return _viewer_cells
+    for row in _viewer_cells:
+        verdict, triggered = evaluate(row, thresholds, critical_metrics=_critical_metrics)
+        row["computed_verdict"] = verdict
+        row["triggered_metrics"] = triggered
+        # final_verdict respects manual qc_overrides.csv (set at run time); only
+        # recompute it here when no human override is on this row.
+        if not row.get("override_verdict"):
+            row["final_verdict"] = verdict
+        row["ephys_qc_score"] = _ephys_qc_score(row, _critical_metrics)
+    return _viewer_cells
+
+
+def _recompute_cell(cell_id: str, *, force_trim_at: int | None) -> dict[str, Any]:
+    """Re-run compute_metrics for one NWB with the given forced trim, evaluate
+    against the current merged thresholds, return ``{metrics, verdict,
+    triggered, ephys_qc_score}``. Does NOT touch the cache or the in-memory
+    viewer state — strictly a live preview.
+    """
+    nwb_path = Path(_manifest_lookup[cell_id])
+    fm = _family_map or StimulusFamilyMap(_cfg.stimulus_protocols if _cfg else {})
+    metrics = compute_metrics(
+        nwb_path, fm,
+        use_efel=bool(getattr(_cfg, "use_efel", True)),
+        trim_bad_ending=bool(getattr(_cfg, "trim_bad_ending", True)),
+        force_trim_at=force_trim_at,
+    )
+    thresholds, _ = _load_current_thresholds()
+    verdict, triggered = (
+        evaluate(metrics, thresholds, critical_metrics=_critical_metrics)
+        if thresholds else ("pass", [])
+    )
+    out = dict(metrics)
+    out["computed_verdict"] = verdict
+    out["triggered_metrics"] = triggered
+    out["ephys_qc_score"] = _ephys_qc_score({"triggered_metrics": triggered}, _critical_metrics)
+    return out
+
+
+# ─── Ephys-QC score (0..1 advisory composite) ───────────────────────
+
+def _ephys_qc_score(row: dict[str, Any],
+                     critical_metrics: set[str] | frozenset[str] | None = None
+                     ) -> float:
+    """Single-scalar advisory score = 1 − (critical_failed / critical_evaluated).
+
+    Reads `triggered_metrics` (a list of {metric, verdict, critical} dicts written
+    by thresholds.evaluate). A clean recording with zero critical triggers scores
+    1.00; each critical fail drops the score by 1/N where N is the number of
+    critical metrics evaluated for this cell. Falls back to 1.00 when
+    triggered_metrics is missing or unparseable.
+    """
+    if critical_metrics is None:
+        critical_metrics = DEFAULT_CRITICAL_METRICS
+    n_critical = max(1, len(critical_metrics))
+    tm = row.get("triggered_metrics")
+    if isinstance(tm, str):
+        try:
+            tm = json.loads(tm)
+        except (json.JSONDecodeError, TypeError):
+            tm = None
+    if not isinstance(tm, list):
+        return 1.0
+    n_failed_critical = sum(
+        1 for t in tm
+        if isinstance(t, dict)
+        and t.get("critical")
+        and t.get("verdict") == "fail"
+    )
+    return max(0.0, 1.0 - n_failed_critical / n_critical)
 
 
 # ─── Cell-list (flag-only, NaN-stripped) ─────────────────────────────
@@ -302,6 +413,8 @@ def _build_cells_for_viewer(report_path: Path) -> tuple[list[dict[str, Any]], in
                 d["triggered_metrics"] = json.loads(tm)
             except (json.JSONDecodeError, TypeError):
                 pass
+        # Derived advisory score for the viewer's headline panel
+        d["ephys_qc_score"] = _ephys_qc_score(d)
         out.append(d)
     return out, total
 
@@ -384,6 +497,96 @@ class _Handler(BaseHTTPRequestHandler):
             log.exception("server error")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(e)})
 
+    def do_POST(self):  # noqa: N802
+        try:
+            self._route_post()
+        except FileNotFoundError as e:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(e)})
+        except (IndexError, ValueError) as e:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            log.exception("server error")
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(e)})
+
+    def _read_json_body(self) -> dict[str, Any]:
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n <= 0:
+            return {}
+        raw = self.rfile.read(n)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(f"invalid JSON body: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError(f"JSON body must be an object, got {type(data).__name__}")
+        return data
+
+    def _route_post(self):
+        path, _, _query = self.path.partition("?")
+
+        if path == "/api/thresholds":
+            body = self._read_json_body()
+            overrides = body.get("overrides", {})
+            if not isinstance(overrides, dict):
+                raise ValueError("body.overrides must be an object {metric: rules}")
+            if _threshold_overrides_path is None:
+                raise FileNotFoundError("threshold_overrides_file not configured")
+            save_threshold_overrides(_threshold_overrides_path, overrides)
+            refreshed = _reevaluate_all_cells()
+            self._send_json(HTTPStatus.OK, {
+                "saved_to": str(_threshold_overrides_path),
+                "n_overrides": len(overrides),
+                "cells": refreshed,
+            })
+            return
+
+        if path == "/api/trim":
+            body = self._read_json_body()
+            cell_id = str(body.get("cell_id", "")).strip()
+            trim_at = body.get("trim_at_sweep")
+            if not cell_id:
+                raise ValueError("body.cell_id required")
+            if trim_at is None:
+                raise ValueError("body.trim_at_sweep required (use 0 to clear trim)")
+            try:
+                trim_at = int(trim_at)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"trim_at_sweep must be an integer: {e}") from e
+            if cell_id not in _cell_sha:
+                raise FileNotFoundError(f"unknown cell_id: {cell_id}")
+            if _trim_overrides_path is None:
+                raise FileNotFoundError("trim_overrides_file not configured")
+            upsert_trim_override(
+                _trim_overrides_path,
+                nwb_sha256=_cell_sha[cell_id],
+                trim_at_sweep=trim_at,
+                note=str(body.get("note", "")),
+                reviewer=str(body.get("reviewer", "")),
+                date=str(body.get("date", "")),
+            )
+            self._send_json(HTTPStatus.OK, {
+                "saved_to": str(_trim_overrides_path),
+                "cell_id": cell_id, "trim_at_sweep": trim_at,
+            })
+            return
+
+        if path.startswith("/api/recompute_cell/"):
+            cell_id = path[len("/api/recompute_cell/"):]
+            if cell_id not in _manifest_lookup:
+                raise FileNotFoundError(f"cell_id not in manifest: {cell_id}")
+            body = self._read_json_body()
+            trim_at = body.get("trim_at_sweep")
+            if trim_at is not None:
+                try:
+                    trim_at = int(trim_at)
+                except (TypeError, ValueError) as e:
+                    raise ValueError(f"trim_at_sweep must be an integer: {e}") from e
+            metrics = _recompute_cell(cell_id, force_trim_at=trim_at)
+            self._send_json(HTTPStatus.OK, metrics)
+            return
+
+        self._send_json(HTTPStatus.NOT_FOUND, {"error": "no POST route", "path": path})
+
     def _route(self):
         path, _, query = self.path.partition("?")
         params = dict(p.split("=", 1) for p in query.split("&") if p and "=" in p)
@@ -410,6 +613,20 @@ class _Handler(BaseHTTPRequestHandler):
                 "n_flag_only": n_flag,
                 "n_total": _total_cells,
                 "cells": _viewer_cells,
+            })
+            return
+
+        if path == "/api/thresholds":
+            # GET — returns merged thresholds (base + override) plus which keys
+            # have been overridden, so the viewer can render edit pencils for
+            # everything and a "modified" badge for keys with overrides.
+            merged, overrides = _load_current_thresholds()
+            self._send_json(HTTPStatus.OK, {
+                "thresholds": merged,
+                "overrides": overrides,
+                "critical_metrics": sorted(_critical_metrics),
+                "base_path": str(_thresholds_base_path) if _thresholds_base_path else None,
+                "overrides_path": str(_threshold_overrides_path) if _threshold_overrides_path else None,
             })
             return
 
@@ -486,6 +703,8 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     """Block while serving on host:port. Ctrl-C to stop."""
     global _manifest_lookup, _cell_sha, _report_path, _template_html, _project_name, _family_map
     global _viewer_cells, _total_cells, _thumbnails_dir, _thumb_disk_cache_enabled
+    global _cfg, _thresholds_base_path, _threshold_overrides_path, _trim_overrides_path
+    global _critical_metrics
     if not cfg.manifest_path or not cfg.manifest_path.exists():
         raise FileNotFoundError(
             f"manifest not found at {cfg.manifest_path}; run `nwb-qc run --config <yaml>` first")
@@ -501,6 +720,12 @@ def serve(cfg: ProjectConfig, *, host: str = "127.0.0.1", port: int = 8765, open
     )
     _thumbnails_dir = cfg.thumbnails_dir
     _thumb_disk_cache_enabled = bool(getattr(cfg, "viewer_cache_thumbnails", True))
+    _cfg = cfg
+    _thresholds_base_path = cfg.thresholds_file
+    _threshold_overrides_path = cfg.threshold_overrides_file
+    _trim_overrides_path = cfg.trim_overrides_file
+    _critical_metrics = (set(cfg.critical_metrics) if cfg.critical_metrics
+                          else set(DEFAULT_CRITICAL_METRICS))
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
     print(f"nwb-qc serve · {cfg.project_name} · {url}")

@@ -17,6 +17,53 @@ def load_thresholds(path: str | Path) -> dict[str, dict[str, Any]]:
         return yaml.safe_load(f) or {}
 
 
+def load_thresholds_with_overrides(
+    base_path: str | Path,
+    overrides_path: str | Path | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Load base thresholds, then layer overrides on top per-metric.
+
+    Returns ``(merged, overrides_only)``. `overrides_only` is empty if the file
+    doesn't exist — useful for the viewer to know which keys were edited.
+
+    Override semantics: if `metric` exists in the override file, its rule
+    *replaces* the base rule wholesale. (Partial-rule merging would let half-
+    edited override files silently mutate untouched bounds.)
+    """
+    merged = dict(load_thresholds(base_path))
+    if overrides_path is None:
+        return merged, {}
+    p = Path(overrides_path)
+    if not p.exists():
+        return merged, {}
+    with open(p) as f:
+        ov_raw = yaml.safe_load(f) or {}
+    overrides = ov_raw.get("metrics", ov_raw)
+    if not isinstance(overrides, dict):
+        return merged, {}
+    for metric, rules in overrides.items():
+        if isinstance(rules, dict):
+            merged[metric] = rules
+    return merged, overrides
+
+
+def save_threshold_overrides(
+    overrides_path: str | Path,
+    overrides: dict[str, dict[str, Any]],
+) -> None:
+    """Atomically write the override map to ``overrides_path`` as YAML.
+
+    Wraps the dict in ``{"metrics": …}`` so the file structure matches the base
+    thresholds file exactly.
+    """
+    p = Path(overrides_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        yaml.safe_dump({"metrics": overrides}, f, sort_keys=True)
+    tmp.replace(p)
+
+
 def evaluate_metric(value: Any, rules: dict[str, Any]) -> tuple[str, str | None]:
     """Evaluate one metric against its rules; return (verdict, triggered_label_or_None).
 

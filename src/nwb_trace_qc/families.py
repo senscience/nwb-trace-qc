@@ -64,6 +64,7 @@ METRIC_TO_FAMILY: dict[str, str] = {
     "ap_amplitude_mv":                "ap_waveform",
     "ap_amp_cv":                      "ap_waveform",
     "ap_failure_fraction":            "ap_waveform",
+    "n_spikes_total":                 "ap_waveform",
     # Long-sweep / firing-train metrics
     "vm_drift_within_sweep_mv_per_s": "rest_firing",
     "late_instability_index":         "rest_firing",
@@ -204,6 +205,12 @@ METRIC_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "n_sweeps_clipped": {"what": "Sweeps that hit the voltage rails (±150 / +80 mV) for ≥1 ms.",
                           "healthy": "0 — any clipped sweep is suspect."},
     "n_sweeps_nan":     {"what": "Sweeps containing NaN samples.", "healthy": "0."},
+    "n_spikes_total": {
+        "what": "Total successful APs detected across ap_waveform + rest_firing sweeps "
+                "(dV/dt initiations that reach ≥ 0 mV). A coarse but useful signal of "
+                "firing activity in the recording. Excludes trimmed sweeps.",
+        "healthy": "Cohort-dependent — context-dependent on the protocol set.",
+    },
     "bad_ending_at_sweep": {
         "what": "First sweep index where the recording started to degrade "
                 "(Vrest depolarised, Rs exploded, or AP overshoot collapsed). "
