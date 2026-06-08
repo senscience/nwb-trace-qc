@@ -305,7 +305,7 @@ A new **"Failures by metric"** strip at the top of the report (visible whenever 
 
 The static thumbnail PNG itself still stacks at most 3 representative sweeps. Within a matched family, picks are **stratified** (first / middle / last) rather than just the first 3, so a cell with 30 APWaveform sweeps shows sweeps #1, #15, #30 — easier to spot within-family drift at a glance.
 
-The HTML has zero external resources. You can copy it to a colleague's laptop and everything still renders (the deep link only works when the viewer is reachable on `localhost`).
+**Sharing the report.** `qc_report.html` is fully self-contained — every thumbnail is base64-inlined, every CSS/JS is embedded. Email or Slack the single file to a collaborator and they can open it in any browser with **no `nwb-qc` install required**. The only feature that needs the tool installed is the "Inspect all sweeps in viewer →" links — those require `nwb-qc serve` running locally (plus the collaborator's own copy of the project YAML + the NWBs). When the viewer isn't reachable, clicking the link unfolds a banner with the exact start command instead of showing a browser error.
 
 **Check before moving on:** the cells that show up in fail/flag actually look bad in their thumbnails. If many cells fail on a single metric that *shouldn't* be cohort-wide (e.g. `qc_protocol_coverage`), that points to a stimulus-name or threshold mismatch — handle in Step 6.
 

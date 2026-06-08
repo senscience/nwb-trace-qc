@@ -541,6 +541,8 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   .viewer-banner code {{ background: #fff; padding: 0.1rem 0.4rem; border: 1px solid #e0b54a; border-radius: 2px; font-size: 0.88rem; user-select: all; }}
   .viewer-banner .copy-btn {{ margin-left: 0.4rem; padding: 0.15rem 0.5rem; font-size: 0.75rem; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 2px; }}
   .viewer-banner .copy-btn:hover {{ background: #f4f6f8; }}
+  .self-contained-note {{ margin-top: 0.35rem; font-size: 0.78rem; color: #555; background: #f4f8fa; border-left: 3px solid #5a9ad6; padding: 0.35rem 0.6rem; }}
+  .self-contained-note code {{ background: #fff; padding: 0.05rem 0.25rem; border-radius: 2px; font-size: 0.95em; }}
 </style>
 </head><body>
 <h1>{html.escape(project_name)} — QC report</h1>
@@ -549,6 +551,11 @@ def render_html(report_df: pd.DataFrame, thumbnails: dict[str, list[Path]], *,
   · <a id='viewer-link-header' href="{html.escape(viewer_url)}/" target='_blank' rel='noopener'
        onclick='return _openViewer(event, this)'
        title="Requires `nwb-qc serve` to be running on {html.escape(viewer_url)}">Open interactive viewer →</a>
+  <div class='self-contained-note'>
+    <b>Self-contained.</b> This file is safe to share — open in any web browser, no install required.
+    The "Inspect all sweeps in viewer" links above and per-cell require <code>nwb-qc serve</code> running
+    locally (plus access to the original NWBs).
+  </div>
 </div>
 
 <!-- Viewer-availability banner: shown when a deep-link click discovers the
