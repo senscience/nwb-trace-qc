@@ -91,6 +91,42 @@ def test_run_report_after_cache_hit_records_zero_new(tiny_project: Path):
     assert rpt["stages"]["metric_compute"]["n_cache_hits"] >= 2
 
 
+def test_report_csv_carries_all_v0_4_plus_metric_columns(tiny_project: Path):
+    """REGRESSION: prior to this fix, pipeline.run hardcoded a v0.1.x whitelist
+    of metric columns to embed in the per-cell row — so every v0.4.0+ metric
+    (n_sweeps_trimmed, bad_ending_at_sweep, ap_amplitude_mv, rac_variability_pct,
+    held_vm_mv, rs_compensation_pct, holding_current_pa, *_session_drift_*, …)
+    was computed and stored in the cache but never propagated to the CSV. The
+    viewer couldn't show the trim banner because row.n_sweeps_trimmed was
+    literally undefined. This test pins the requirement that the report CSV
+    spreads every cache column (less internal routing fields) through to each
+    per-cell row.
+    """
+    import pandas as pd
+    cfg = load_config(tiny_project)
+    pipeline_run(cfg)
+    df = pd.read_csv(cfg.report_csv)
+    expected_columns = {
+        # v0.4.0 bad-ending detection
+        "n_sweeps_trimmed", "bad_ending_at_sweep", "bad_ending_reason",
+        # v0.3.0 whole-cell + visual-defect metrics
+        "holding_current_pa", "holding_current_drift_pa",
+        "vrest_session_drift_mv", "rs_session_drift_pct",
+        "ap_overshoot_session_drift_mv", "test_pulse_edge_overshoot_mv",
+        "ap_amp_overshoot_min_mv", "ap_amp_attenuation_frac",
+        # v0.5.0 LNMC experimenter-guidance
+        "ap_amplitude_mv", "rs_compensation_pct", "rac_variability_pct",
+        "held_vm_mv",
+        # v0.3.0 IV-derived
+        "rin_r2",
+    }
+    missing = expected_columns - set(df.columns)
+    assert not missing, (
+        f"Report CSV is missing metric columns the cache produced: {sorted(missing)}. "
+        f"The hardcoded whitelist in pipeline.run was probably regressed."
+    )
+
+
 def test_progress_callback_invoked(tiny_project: Path):
     cfg = load_config(tiny_project)
     calls: list[tuple[str, int, int]] = []

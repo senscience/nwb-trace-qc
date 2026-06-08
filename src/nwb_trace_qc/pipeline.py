@@ -420,18 +420,24 @@ def run(
             continue
         m = metric_row.iloc[0].to_dict()
         verdict, triggered = evaluate(m, thresholds, critical_metrics=critical_metrics)
+        # Spread every metric column from the cache row through to the report
+        # row — the previous hardcoded whitelist was last touched in v0.1.x and
+        # silently dropped every v0.4.0+ addition (n_sweeps_trimmed,
+        # bad_ending_at_sweep, ap_amplitude_mv, rac_variability_pct,
+        # rs_compensation_pct, held_vm_mv, …), which is why the viewer's
+        # trim banner and chips were never firing — the data was there,
+        # just not propagated. Exclude only the routing/internal fields we
+        # don't want duplicated.
+        _NON_METRIC_COLUMNS = {
+            "cell_id", "dataset", "nwb_path", "nwb_sha256",
+            "pipeline_version", "computed_verdict", "triggered_metrics",
+        }
+        row_payload = {k: v for k, v in m.items() if k not in _NON_METRIC_COLUMNS}
         rows.append({
             "cell_id": r.cell_id, "dataset": r.dataset,
             "nwb_path": r.nwb_path, "nwb_sha256": r.nwb_sha256,
             "computed_verdict": verdict, "triggered_metrics": triggered,
-            **{k: m.get(k) for k in [
-                "vrest_mv","vrest_drift_mv","rs_mohm_initial","rs_mohm_final","rs_drift_pct",
-                "rin_mohm","ap_amp_overshoot_mv","ap_threshold_drift_mv","baseline_rms_mv",
-                "n_sweeps_total","n_sweeps_clipped","n_sweeps_nan","qc_protocol_coverage",
-                "rac_decay_residual_rel","vm_drift_within_sweep_mv_per_s",
-                "ap_failure_fraction","ap_amp_cv","late_instability_index",
-                "compute_error",
-            ]},
+            **row_payload,
         })
     verdicts = pd.DataFrame(rows)
     rule_counts = verdicts["computed_verdict"].value_counts().to_dict() if not verdicts.empty else {}
