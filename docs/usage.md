@@ -2,9 +2,77 @@
 
 A linear, step-by-step walkthrough from a folder of NWBs to a triaged, human-reviewed verdict for every cell. Each step shows the exact command, the output you should see, and what to check before moving on.
 
-The fast path is **Steps 1 → 4** and you have a report. **Step 5** opens the interactive viewer for visual verification. **Step 6** is the iteration loop (thresholds, overrides, optional LLM second opinion).
+The fast path is **Steps 1 → 4** and you have an auto-pipeline queue. **Step 5** opens the **interactive viewer where curation happens** — tag each cell PASS / FLAG / FAIL with a reason and your name; saves to `qc_overrides.csv`; the static report becomes a curation log of those decisions. **Step 6** is the iteration loop (thresholds, overrides, optional LLM second opinion).
 
 ---
+
+## What changed in v0.8.0
+
+Workflow inversion. The auto-pipeline still computes verdicts, but the
+**viewer is now the workspace where decisions are made**, and the static
+report is rendered from those decisions instead of being the centerpiece.
+
+- **In-viewer curation**: every cell has a Decision block (PASS / FLAG /
+  FAIL buttons + reason textarea). Saves to `qc_overrides.csv` via the
+  new `POST /api/curation` endpoint; the cell-list verdict chip re-colors
+  instantly. Reviewer + date are stamped automatically — reviewer comes
+  from `curator:` in your project YAML (the wizard prompts for it on
+  first run); date is today's ISO date.
+- **`qc_report.html` is now a curation log** with two sections —
+  *Awaiting review* (the queue, sorted fail→flag, each row has a
+  "Curate in viewer →" deep link) and *Curated* (decisions with
+  reviewer / date / note). No more thumbnail grid — sweep exploration
+  happens in the viewer. HTML drops from ~10–50 MB to <500 KB, actually
+  shareable.
+- **Thumbnail PNG generation skipped by default**: the pipeline's
+  thumbnail stage is now gated behind `vision_judge.enabled` (the only
+  remaining consumer). On a typical cohort that saves 30s–5min per run.
+- **Wizard outcome menu reordered**: `[s]erve viewer` is now the default
+  action, `[o]pen static report` is secondary.
+- **CSV schema unchanged**: `qc_overrides.csv` columns
+  (`cell_id, override_verdict, note, reviewer, date`) are exactly as
+  they've always been; v0.8.0 just adds a programmatic writer
+  (`upsert_override` mirroring `upsert_trim_override`) so the viewer can
+  save without people opening the CSV by hand. Existing hand-edited
+  overrides still work.
+
+`PIPELINE_VERSION` bumped to `0.8.0`; v0.7.x cache invalidates
+automatically.
+
+## What changed in v0.7.0 → 0.7.1
+
+Viewer rewrite + critical iteration-order fix.
+
+- **Viewer redesign (v0.7.0)**: single overlay canvas drawing every
+  sweep on shared axes (instead of a 4-slot grid of thumbnails);
+  per-family toggle pills; pan/zoom (scroll/drag/dblclick); eight-row
+  headline-metrics panel on the right (RMP / RMP drift / baseline
+  noise / Rin / detected spikes / max depolarization / clipping
+  fraction / Ephys QC composite) with inline threshold pencils;
+  trim-cutoff slider with live recompute via `POST /api/recompute_cell`;
+  collapsible "Cell metadata" details element for the full per-cell
+  field set. Decimation budget per trace is 800 LTTB points
+  (`?max_points=800` on `/api/trace`).
+- **New `n_spikes_total` metric** — sum of successful APs (dV/dt
+  initiations reaching ≥ 0 mV) across `ap_waveform` + `rest_firing`
+  families. Excludes trimmed sweeps.
+- **New `ephys_qc_score`** (server-derived, viewer-only) —
+  `1 − (n_critical_failed / n_critical_evaluated)`, a single 0..1
+  composite for the headline panel's "Ephys QC (advisory)" row.
+- **Threshold + trim editing** persists to `threshold_overrides.yaml`
+  and `qc_trim_overrides.csv` next to `output_dir`; the pipeline
+  automatically merges these on the next run (overridden NWB shas are
+  cache-busted so the recompute reflects the manual cutoff).
+- **Critical fix (v0.7.1) — chronological sweep iteration**: some NWB
+  writers group sweeps by stimulus type in `acquisition.items()`, so
+  dict-insertion order didn't match recording time. The bad-ending
+  detector trimmed everything past the first Rs-explosion in iteration
+  order — which on cells like JY171019_B_1 meant trimming every
+  spontaneous sweep (they were dict-bunched at positions 179–191 but
+  chronologically scattered across the session, including the very
+  first one recorded). `_iter_current_clamp_acqs` now sorts by
+  `starting_time`. This recovers Vrest / Rin / held-Vm on every cell
+  with stim-grouped acquisition dicts.
 
 ## What changed in v0.6.0
 
@@ -70,7 +138,7 @@ This walks you through five stages, pausing for confirmation between each:
 3. **Review thresholds** — shows the active `thresholds_file` YAML so you can sanity-check the rules before paying the metric-compute cost. `[a]ccept` (Enter, default — proceed to dry-run with the current rules) / `[e]dit` (opens the YAML in `$EDITOR`; re-display + re-prompt after save) / `[q]uit`. No cohort data exists yet at this point — this is editorial review, not statistical calibration. After the first run you can come back via `[t]une-thresholds` (cohort-aware) in the outcome menu or via `nwb-qc tune` standalone.
 4. **Dry-run** — shows which NWBs were discovered and how many will be processed. `[r]un`, `[b]ack` to re-edit the config, or `[q]uit`.
 5. **Run** — executes the pipeline with a live `[stage 2/6 metric-compute] 142/2302 cells …  ETA 28m` progress line. After the pipeline completes, the wizard also auto-runs `calibrate` against the freshly computed cache and writes two side files: `cohort_stats.json` (consumed by future reports to add cohort-percentile context to triggered-metric chips) and `<thresholds_stem>_thresholds_suggested.yaml` (a thresholds YAML derived from cohort percentiles, ready to opt into).
-6. **Outcome** — prints the report paths, the cohort-stats and suggested-thresholds paths, and offers `[o]pen` report / `[s]erve` viewer / `[t]une-thresholds` / `[c]alibrate-and-re-run` / `[d]one`. The default is `[d]one` so a first-time run can complete with bundled defaults by just pressing Enter. Choosing `[t]` walks you through every threshold rule interactively (see Step 6f below). Choosing `[c]` rewrites the project YAML's `thresholds_file:` to point at the auto-generated suggested file and re-runs the pipeline immediately — the re-run is cache-fast (only the threshold layer re-evaluates), so you can compare bundled-defaults vs cohort-calibrated verdicts in seconds.
+6. **Outcome** — prints the report paths, the cohort-stats and suggested-thresholds paths, and offers `[s]erve` viewer / `[o]pen` curation log / `[t]une-thresholds` / `[c]alibrate-and-re-run` / `[d]one`. The default is `[s]erve` (v0.8.0) because the viewer is where decisions actually get made — `nwb-qc serve` opens with the queue ready to curate. `[o]pen` opens the static curation log (`qc_report.html`) as a shareable artifact. Choosing `[t]` walks you through every threshold rule interactively (see Step 6f below). Choosing `[c]` rewrites the project YAML's `thresholds_file:` to point at the auto-generated suggested file and re-runs the pipeline immediately — the re-run is cache-fast (only the threshold layer re-evaluates), so you can compare bundled-defaults vs cohort-calibrated verdicts in seconds.
 
 **Re-entering the wizard**: running `nwb-qc start <root>` a second time, with an existing project YAML and warm cache, the wizard detects the prior state and offers to skip straight to the outcome stage (so you can tune / serve / open the existing report without re-walking inspect → propose → dry-run → run). Pick `[r]estart` to do the full flow instead, or `[q]uit` to exit.
 
@@ -305,7 +373,7 @@ A new **"Failures by metric"** strip at the top of the report (visible whenever 
 
 The static thumbnail PNG itself still stacks at most 3 representative sweeps. Within a matched family, picks are **stratified** (first / middle / last) rather than just the first 3, so a cell with 30 APWaveform sweeps shows sweeps #1, #15, #30 — easier to spot within-family drift at a glance.
 
-**Sharing the report.** `qc_report.html` is fully self-contained — every thumbnail is base64-inlined, every CSS/JS is embedded. Email or Slack the single file to a collaborator and they can open it in any browser with **no `nwb-qc` install required**. The only feature that needs the tool installed is the "Inspect all sweeps in viewer →" links — those require `nwb-qc serve` running locally (plus the collaborator's own copy of the project YAML + the NWBs). When the viewer isn't reachable, clicking the link unfolds a banner with the exact start command instead of showing a browser error.
+**Sharing the report.** `qc_report.html` is fully self-contained — CSS / JS embedded, no external assets. As of v0.8.0 it no longer embeds thumbnail PNGs (sweep exploration is the viewer's job), so the file is typically <500 KB instead of 10–50 MB. Email or Slack the single file to a collaborator and they can open it in any browser with **no `nwb-qc` install required**. The only feature that needs the tool installed is the "Curate in viewer →" links — those require `nwb-qc serve` running locally (plus the collaborator's own copy of the project YAML + the NWBs). When the viewer isn't reachable, clicking the link unfolds a banner with the exact start command instead of showing a browser error.
 
 **Check before moving on:** the cells that show up in fail/flag actually look bad in their thumbnails. If many cells fail on a single metric that *shouldn't* be cohort-wide (e.g. `qc_protocol_coverage`), that points to a stimulus-name or threshold mismatch — handle in Step 6.
 
@@ -333,7 +401,7 @@ Sweep traces are LTTB-decimated to 1500 points per fetch and cached in the brows
 
 **Deep-linking:** the static report's per-cell "Inspect all sweeps →" link uses `?cell=<cell_id>` — the viewer auto-selects that cell on load. Use this to keep the cohort triage flow tight: static report for the at-a-glance verdict + the 3-stacked thumbnail, viewer for any-sweep depth.
 
-**Unmapped-protocols warning:** if a selected cell's implicated families have *zero* matching sweeps in the NWB (typically: your `stimulus_protocols:` mapping doesn't cover this lab's protocol names), the sweep grid shows a yellow callout pointing at the YAML's `# ⚠ UNMAPPED tokens` block and a "show all sweeps" shortcut. Fix the mapping (Step 1), rerun, and the warning disappears.
+**Unmapped-protocols sanity check:** if every family pill in the viewer shows the count `0` for the implicated families on a flagged cell, your `stimulus_protocols:` mapping probably doesn't cover this lab's protocol names — the cell's sweeps all fell into the `other` bucket. Fix the mapping (Step 1), re-run, and the implicated families repopulate.
 
 You can also hit the API directly for scripting:
 

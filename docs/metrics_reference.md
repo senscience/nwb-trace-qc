@@ -1,4 +1,4 @@
-# `nwb-trace-qc` metric reference (v0.7.0)
+# `nwb-trace-qc` metric reference (v0.8.0)
 
 For every metric `nwb-trace-qc` emits, this doc says (a) what the metric
 measures, (b) the healthy range, (c) the implicated stimulus family,

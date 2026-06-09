@@ -61,6 +61,12 @@ stimulus_protocols:
 # 4. Thresholds — usually a separate YAML so you can edit without touching project config.
 thresholds_file: ./my_thresholds.yaml
 
+# 4b. (v0.8.0) Curator identity — stamped onto every decision saved from the viewer's
+#     "PASS / FLAG / FAIL" buttons. If unset, the viewer prompts once per session and
+#     stashes the answer in localStorage. The wizard prompts for this value during
+#     `nwb-qc start` (Stage 2's "accept config" step).
+# curator: cristina
+
 # 5. Execution.
 n_workers: 6
 
@@ -83,6 +89,10 @@ n_workers: 6
 #   - qc_protocol_coverage
 #   - n_sweeps_clipped
 #   - n_sweeps_nan
+# threshold_overrides_file: ./threshold_overrides.yaml   # v0.7.0 — viewer's threshold pencils write here
+# trim_overrides_file: ./qc_trim_overrides.csv           # v0.7.0 — viewer's trim slider's "save trim" writes here
+#                              # Both default to <output_dir>/<name>; the pipeline picks them up automatically
+#                              # on the next `nwb-qc run` (override sha → cache-bust → recompute).
 
 # 6. (Optional) Cell-id table for richer dataset attribution (e.g. one CSV that knows
 #    which dataset each cell belongs to).

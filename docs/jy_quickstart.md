@@ -83,11 +83,36 @@ reference are documented in [`metrics_reference.md`](metrics_reference.md).
     per-sweep ✂ markers + cell-list chip.
   - Viewer sorts flag-first, accepts `--host 0.0.0.0` for one-serves-many
     network sharing.
+- **v0.7.0 → 0.7.1** — viewer-as-workspace + iteration ordering fix:
+  - `n_spikes_total` (sum of successful APs) + `ephys_qc_score` (0..1
+    composite from critical-metric fails).
+  - Full viewer rewrite: single overlay canvas, per-family toggle pills,
+    pan/zoom (scroll/drag/dblclick), eight-row headline metrics panel,
+    inline threshold pencils, trim slider with live recompute.
+  - Critical fix: `_iter_current_clamp_acqs` now sorts sweeps by
+    `starting_time`. For JY171019_B_1 this unblocked `vrest_mv` (was
+    spuriously NaN because every spontaneous sweep was at dict-positions
+    179–191 even though chronologically they were the earliest recorded).
+- **v0.8.0** — workflow inversion: viewer-driven curation:
+  - Decision block in the viewer: PASS/FLAG/FAIL per cell with a reason;
+    curator name (from `curator:` in the project YAML) and date stamp
+    automatically; saves to `qc_overrides.csv`.
+  - The static report becomes a **curation log** with two sections —
+    *Awaiting review* (the queue, sorted fail→flag, each row deep-links to
+    the viewer) and *Curated* (decisions with reviewer/date/note).
+  - Sweep thumbnail grid removed from the report (the viewer's overlay +
+    pan/zoom is where exploration happens). Thumbnail PNG generation in
+    the pipeline now only runs when `vision_judge.enabled: true`.
+  - Wizard outcome menu reordered: `[s]erve` is the default (curate
+    here) and `[o]pen` opens the curation log as a secondary action.
 
 The expected effect on the JY cohort: the v0.1.0 coverage-failure mass should
 move from `fail` → `flag` (advisory demotion), absolute Rs is now meaningful
-(v0.3.0 fix), and bad-ending trim eliminates spurious fails caused by the last
-few sweeps of a degrading session. Run with the v0.6.0 binary and the existing
+(v0.3.0 fix), bad-ending trim eliminates spurious fails (v0.4.0), and the
+v0.7.1 chronological-iteration fix recovers Vrest/Rin on cells like
+JY171019_B_1 that had stim-grouped acquisition dicts. From v0.8.0 onward the
+report won't surface auto-verdict counts as the headline — it's the
+queue + decisions log. Run with the v0.8.0 binary and the existing
 `configs/jy_project.yaml` to see current numbers.
 
 ## Known cohort-specific tuning opportunities
@@ -115,7 +140,7 @@ The inaugural defaults flag many cells for two diagnosable cohort-specific reaso
 open qc_output_jy/qc_report.html
 ```
 
-Defaults to **Fail + Flag** only — pass cells are hidden until you toggle them on. Filter strip at the top supports dataset, verdict, brain region, and cell-id search. Click any row to expand the full metric table and the inline thumbnails of the offending sweeps.
+From v0.8.0 the static report is a **curation log** with two sections: *Awaiting review* (the queue, sorted fail→flag) and *Curated* (decisions with curator / date / note). Each row deep-links to the corresponding cell in the viewer with `Curate in viewer →`. No more thumbnail grid — sweep exploration happens in the viewer's overlay canvas.
 
 To stick a verdict from human review, append a row to `qc_output_jy/qc_overrides.csv`:
 

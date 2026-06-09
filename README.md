@@ -100,7 +100,7 @@ STAGE 5/6 · Run
 [thresholds]        ████████████████████████  3/3   elapsed 0.1s
 [thumbnails]        ████████████████████████  3/3   elapsed 3.8s
 [report]            ████████████████████████        elapsed 0.5s
-  → qc_output_single_cell_dataset/qc_report.html  (5.1 MB)
+  → qc_output_single_cell_dataset/qc_report.html  (412 KB · curation log)
 
 ══════════════════════════════════════════════════════════════════
 STAGE 6/6 · Outcome  ·  0 pass · 2 flag · 1 fail
