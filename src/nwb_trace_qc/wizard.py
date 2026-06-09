@@ -8,7 +8,7 @@ during the metric-compute stage.
   2. Propose      — generate project YAML; [a]ccept / [e]dit in $EDITOR / [q]uit
   3. Dry-run      — list discovered cells; [r]un / [b]ack / [q]uit
   4. Run          — execute pipeline with progress; on completion show summary
-  5. Outcome      — show paths; [o]pen report / [s]erve / [Enter] done
+  5. Outcome      — show paths; [s]erve viewer / [o]pen report / [Enter] done
 """
 from __future__ import annotations
 
@@ -620,10 +620,13 @@ def _stage_outcome(result: dict, *, with_vision: bool | None,
             dim=True)
     _hr()
 
-    choices = ["open", "serve", "tune-thresholds", "done"]
+    # v0.8.0: curation lives in the viewer, so [s]erve is the primary action.
+    # The static report is still useful as a curation log + shareable artifact,
+    # but it's no longer where decisions happen — kept second.
+    choices = ["serve", "open", "tune-thresholds", "done"]
     if suggested:
-        choices = ["open", "serve", "tune-thresholds", "calibrate-and-rerun", "done"]
-    ans = _prompt_choice("next", choices, default="d")
+        choices = ["serve", "open", "tune-thresholds", "calibrate-and-rerun", "done"]
+    ans = _prompt_choice("next", choices, default="s")
     if ans == "o":
         report = result.get("report")
         if report and Path(report).exists():

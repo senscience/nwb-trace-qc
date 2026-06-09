@@ -464,59 +464,75 @@ def run(
         "n_total": int(verdicts.shape[0]),
     })
 
-    # ─── Stage 3.5: thumbnails for non-pass cells ────────────────
-    total_thumbs = int((verdicts["computed_verdict"] != "pass").sum())
-    t0 = _stage_start("thumbnails", total=total_thumbs)
+    # ─── Stage 3.5: thumbnails (vision-judge inputs only) ────────
+    # v0.8.0: the static report no longer embeds sweep thumbnails (the viewer
+    # owns sweep exploration). The only consumer left is the optional vision
+    # judge, which feeds PNG bytes to a multimodal LLM. So we skip this stage
+    # entirely unless vision_judge is enabled — saving 30s–5min on cohorts
+    # that aren't using the LLM second opinion.
     thumbs: dict[str, list[Path]] = {}
-    cfg.thumbnails_dir.mkdir(parents=True, exist_ok=True)
-    seen_for_sha: dict[str, list[Path]] = {}
-    n_generated = 0
-    n_skipped = 0
-    n_no_voltage = 0
-    n_render_error = 0
-    done_thumbs = 0
-    for r in verdicts.itertuples(index=False):
-        if r.computed_verdict == "pass":
-            continue
-        done_thumbs += 1
-        sha8 = r.nwb_sha256[:8]
-        if r.nwb_sha256 in seen_for_sha:
-            thumbs[r.cell_id] = seen_for_sha[r.nwb_sha256]
-        else:
-            triggered = [t for t in (r.triggered_metrics or []) if isinstance(t, dict)]
-            # Look up this cell's full metric row in the cache so the picker can
-            # use provenance fields (e.g. rs_mohm_provenance.first/last) to
-            # render the specific sweeps that drove the failed metric values.
-            metric_row = None
-            metric_match = cache_df[cache_df["nwb_sha256"] == r.nwb_sha256]
-            if not metric_match.empty:
-                metric_row = metric_match.iloc[0].to_dict()
-            out = cfg.thumbnails_dir / f"{sha8}__{Path(r.nwb_path).stem}.png"
-            if out.exists():
-                n_skipped += 1
+    vision_enabled = bool(getattr(cfg.vision_judge, "enabled", False))
+    if not vision_enabled:
+        # Still record the stage in run_report (with n_total=0) so the test
+        # contract + telemetry stay stable. Skips the whole loop.
+        t0 = _stage_start("thumbnails", total=0)
+        _stage_end("thumbnails", t0, {
+            "n_generated": 0, "n_skipped_existing": 0,
+            "n_no_voltage_sweeps": 0, "n_render_errors": 0,
+            "n_total": 0, "skipped_reason": "vision_judge disabled",
+        })
+    else:
+        total_thumbs = int((verdicts["computed_verdict"] != "pass").sum())
+        t0 = _stage_start("thumbnails", total=total_thumbs)
+        cfg.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+        seen_for_sha: dict[str, list[Path]] = {}
+        n_generated = 0
+        n_skipped = 0
+        n_no_voltage = 0
+        n_render_error = 0
+        done_thumbs = 0
+        for r in verdicts.itertuples(index=False):
+            if r.computed_verdict == "pass":
+                continue
+            done_thumbs += 1
+            sha8 = r.nwb_sha256[:8]
+            if r.nwb_sha256 in seen_for_sha:
+                thumbs[r.cell_id] = seen_for_sha[r.nwb_sha256]
             else:
-                _, status = _make_thumbnail(Path(r.nwb_path), out,
-                                             families=cfg.stimulus_protocols,
-                                             triggered_metrics=triggered,
-                                             metric_row=metric_row)
-                if status == "rendered":
-                    n_generated += 1
-                elif status == "no_voltage_sweeps":
-                    n_no_voltage += 1
-                elif status == "render_error":
-                    n_render_error += 1
-            if out.exists():
-                seen_for_sha[r.nwb_sha256] = [out]
-                thumbs[r.cell_id] = [out]
-        if progress_callback:
-            progress_callback("thumbnails", done_thumbs, total_thumbs)
-    _stage_end("thumbnails", t0, {
-        "n_generated": int(n_generated),
-        "n_skipped_existing": int(n_skipped),
-        "n_no_voltage_sweeps": int(n_no_voltage),
-        "n_render_errors": int(n_render_error),
-        "n_total": int(total_thumbs),
-    })
+                triggered = [t for t in (r.triggered_metrics or []) if isinstance(t, dict)]
+                # Look up this cell's full metric row in the cache so the picker can
+                # use provenance fields (e.g. rs_mohm_provenance.first/last) to
+                # render the specific sweeps that drove the failed metric values.
+                metric_row = None
+                metric_match = cache_df[cache_df["nwb_sha256"] == r.nwb_sha256]
+                if not metric_match.empty:
+                    metric_row = metric_match.iloc[0].to_dict()
+                out = cfg.thumbnails_dir / f"{sha8}__{Path(r.nwb_path).stem}.png"
+                if out.exists():
+                    n_skipped += 1
+                else:
+                    _, status = _make_thumbnail(Path(r.nwb_path), out,
+                                                 families=cfg.stimulus_protocols,
+                                                 triggered_metrics=triggered,
+                                                 metric_row=metric_row)
+                    if status == "rendered":
+                        n_generated += 1
+                    elif status == "no_voltage_sweeps":
+                        n_no_voltage += 1
+                    elif status == "render_error":
+                        n_render_error += 1
+                if out.exists():
+                    seen_for_sha[r.nwb_sha256] = [out]
+                    thumbs[r.cell_id] = [out]
+            if progress_callback:
+                progress_callback("thumbnails", done_thumbs, total_thumbs)
+        _stage_end("thumbnails", t0, {
+            "n_generated": int(n_generated),
+            "n_skipped_existing": int(n_skipped),
+            "n_no_voltage_sweeps": int(n_no_voltage),
+            "n_render_errors": int(n_render_error),
+            "n_total": int(total_thumbs),
+        })
 
     # ─── Stage 3.7: optional vision judge ────────────────────────
     vision_stats: dict[str, Any] = {"enabled": False}

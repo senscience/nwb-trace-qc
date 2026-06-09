@@ -105,11 +105,11 @@ STAGE 5/6 · Run
 ══════════════════════════════════════════════════════════════════
 STAGE 6/6 · Outcome  ·  0 pass · 2 flag · 1 fail
 ──────────────────────────────────────────────────────────────────
-  [v] open viewer for visual inspection
+  [s] serve the interactive viewer (curate cells here — primary path)
+  [o] open the static curation log (qc_report.html — queue + decisions)
   [t] tune thresholds from cohort percentiles + re-render
-  [o] open the static report
-  [q] done
-choice [v]: v
+  [d] done
+next [s]: s
   starting viewer at http://127.0.0.1:8765/ …
 ```
 

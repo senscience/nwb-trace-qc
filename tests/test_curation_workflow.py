@@ -207,6 +207,60 @@ def test_report_empty_curated_section_shows_empty_state():
     assert "No decisions saved yet" in html_str
 
 
+def test_pipeline_skips_thumbnail_stage_when_vision_disabled(tmp_path: Path):
+    """v0.8.0: the static report no longer embeds thumbnails. The only consumer
+    left is the optional vision judge. So the pipeline's thumbnails stage must
+    skip its work when vision is disabled — no PNG files written, no time spent.
+    The stage telemetry is still recorded (n_total=0) so the run_report contract
+    stays stable.
+    """
+    from datetime import datetime, timezone
+    import numpy as np, pynwb, yaml
+    from nwb_trace_qc.config import load_config
+    from nwb_trace_qc.pipeline import run as pipeline_run
+
+    nwb_dir = tmp_path / "nwbs"
+    nwb_dir.mkdir()
+    nwbfile = pynwb.NWBFile(
+        session_description="t", identifier="c",
+        session_start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    elec = nwbfile.create_icephys_electrode(
+        name="elec0", description="d",
+        device=nwbfile.create_device(name="a", description="d"),
+    )
+    nwbfile.add_acquisition(pynwb.icephys.CurrentClampSeries(
+        name="ic__APWaveform__001", data=np.linspace(-0.07, 0.03, 800),
+        electrode=elec, gain=1.0, starting_time=0.0, rate=10000.0, unit="volts",
+    ))
+    with pynwb.NWBHDF5IO(str(nwb_dir / "c.nwb"), mode="w") as io:
+        io.write(nwbfile)
+    th = tmp_path / "thresholds.yaml"
+    th.write_text(yaml.safe_dump({"metrics": {
+        "vrest_mv": {"pass": {"min": -200, "max": 200},
+                     "flag": {"min": -200, "max": 200}},
+    }}))
+    cfg_path = tmp_path / "project.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "project_name": "t", "output_dir": str(tmp_path / "out"),
+        "nwb_sources": [{"dataset": "ds", "path": str(nwb_dir), "glob": "*.nwb"}],
+        "stimulus_protocols": {"ap_waveform": ["APWaveform"]},
+        "thresholds_file": str(th), "n_workers": 1,
+        # vision_judge.enabled defaults to False — the gate path.
+    }))
+    cfg = load_config(cfg_path)
+    result = pipeline_run(cfg)
+    rpt = json.loads(Path(result["run_report"]).read_text())
+    thumb_stage = rpt["stages"]["thumbnails"]
+    assert thumb_stage["n_total"] == 0
+    assert thumb_stage["skipped_reason"] == "vision_judge disabled"
+    # No PNGs should have been written to the thumbnails directory.
+    traces_dir = cfg.thumbnails_dir
+    if traces_dir.exists():
+        pngs = list(traces_dir.glob("*.png"))
+        assert not pngs, f"thumbnail PNGs should not be created when vision is off — found {pngs}"
+
+
 def test_report_shows_curate_in_viewer_link():
     df = _tiny_report_df(curated=False)
     html_str = render_html(df, thumbnails={}, project_name="t",
