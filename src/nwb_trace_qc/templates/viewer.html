@@ -264,6 +264,13 @@ let CRITICAL_METRICS = new Set();
 let pendingTrim = null;    // last requested trim value (cleared on save)
 let originalCutoff = null; // bad_ending_at_sweep from the cohort report
 let nSweepsTotal = 0;
+// Generation counter for selectCell — increments on every call. Stale awaits
+// from a previous cell click check this before writing state, so a fast
+// double-click doesn't overwrite the newer cell's panel with older data.
+let _selectGen = 0;
+// True while traces are still arriving — used to distinguish "no sweeps
+// enabled" (user toggled them all off) from "still fetching" (initial load).
+let _tracesLoading = false;
 // Pan/zoom state for the overlay canvas. null = "auto bounds from data".
 let viewport = null;             // {xMin, xMax, yMin, yMax}
 let autoBounds = null;           // last computed auto bounds; used to compute zoom%
@@ -381,39 +388,70 @@ function renderCellList() {
 
 // ─── Cell selection ───────────────────────────────────────────────
 async function selectCell(cellId) {
+  // Generation token: every selectCell call gets a fresh number; awaits below
+  // bail when a newer call has superseded them. Without this, a slow trace
+  // fetch from cell A could resolve AFTER the user clicked cell B and write
+  // A's overlay/state on top of B.
+  const myGen = ++_selectGen;
   activeCell = cellId;
-  document.querySelectorAll('#cell-list li').forEach(li => li.classList.toggle('active', li.dataset.cellid === cellId));
+  document.querySelectorAll('#cell-list li').forEach(li =>
+    li.classList.toggle('active', li.dataset.cellid === cellId));
   const row = CELLS.find(c => c.cell_id === cellId) || {};
+
+  // 1) Render everything we ALREADY have, synchronously. The cell row from
+  //    /api/cells (loaded at startup) carries every metric we need for the
+  //    headline panel + curation block + cell header. No reason to wait on
+  //    /api/sweeps for these — that was the "metrics stay stuck on the old
+  //    cell" symptom.
+  pendingTrim = null;
+  viewport = null;
   renderCellHeader(row);
   renderTrimBanner(row);
+  renderHeadlineMetrics(row);
+  renderCurationBlock(row);
+  renderMetadataTable(row);
+  _tracesLoading = true;
+  drawOverlay();   // shows "loading sweeps…" immediately
 
-  // Load sweeps for this cell (cached)
-  if (!sweepsCache[cellId]) {
-    const r = await fetch(`/api/sweeps/${encodeURIComponent(cellId)}`);
-    if (!r.ok) {
-      $('#overlay-wrap').innerHTML = `<div class="empty-state">error loading sweeps: ${r.status}</div>`;
+  // 2) Sweep metadata + traces. Both async; bail if user has moved on.
+  let sweeps = sweepsCache[cellId];
+  if (!sweeps) {
+    try {
+      const r = await fetch(`/api/sweeps/${encodeURIComponent(cellId)}`);
+      if (myGen !== _selectGen) return;   // user clicked another cell
+      if (!r.ok) {
+        $('#overlay-wrap').insertAdjacentHTML('beforeend',
+          `<div class="empty-state">error loading sweeps: ${r.status}</div>`);
+        _tracesLoading = false;
+        return;
+      }
+      sweeps = await r.json();
+      if (myGen !== _selectGen) return;
+      sweepsCache[cellId] = sweeps;
+    } catch (e) {
+      if (myGen !== _selectGen) return;
+      _tracesLoading = false;
       return;
     }
-    sweepsCache[cellId] = await r.json();
   }
-  const sweeps = sweepsCache[cellId];
   nSweepsTotal = sweeps.length;
   originalCutoff = (typeof row.bad_ending_at_sweep === 'number' && !isNaN(row.bad_ending_at_sweep))
                    ? row.bad_ending_at_sweep : null;
-  pendingTrim = null;
-  viewport = null;  // reset zoom when switching cells
-
   // Reset family toggles — all on by default.
   familyEnabled = {};
   for (const s of sweeps) familyEnabled[s.family || 'other'] = true;
   renderFamilyToggles(row);
   renderTrimSlider();
-  renderHeadlineMetrics(row);
-  renderCurationBlock(row);
-  renderMetadataTable(row);
 
-  // Fetch all traces in parallel (with concurrency cap so we don't hammer)
-  await fetchTracesFor(cellId, sweeps.map(s => s.idx));
+  // 3) Fetch traces progressively. drawOverlay() is called as batches arrive
+  //    so the user sees the plot fill in instead of staring at a blank canvas
+  //    for several seconds on cells with hundreds of sweeps.
+  await fetchTracesFor(cellId, sweeps.map(s => s.idx), {
+    onProgress: () => { if (myGen === _selectGen) drawOverlay(); },
+    isCurrent: () => myGen === _selectGen,
+  });
+  if (myGen !== _selectGen) return;
+  _tracesLoading = false;
   drawOverlay();
 }
 
@@ -559,10 +597,12 @@ function scheduleRecompute(trimVal) {
 }
 
 // ─── Overlay canvas ───────────────────────────────────────────────
-async function fetchTracesFor(cellId, idxs) {
+async function fetchTracesFor(cellId, idxs, { onProgress, isCurrent } = {}) {
   const missing = idxs.filter(i => !traceCache[`${cellId}/${i}`]);
   const CONCURRENCY = 6;
+  let lastTick = 0;
   for (let i = 0; i < missing.length; i += CONCURRENCY) {
+    if (isCurrent && !isCurrent()) return;   // user clicked away
     const batch = missing.slice(i, i + CONCURRENCY);
     await Promise.all(batch.map(async idx => {
       try {
@@ -570,6 +610,11 @@ async function fetchTracesFor(cellId, idxs) {
         if (r.ok) traceCache[`${cellId}/${idx}`] = await r.json();
       } catch (e) {}
     }));
+    if (onProgress) {
+      // Throttle redraws to ~5fps so huge cells (>500 sweeps) don't pin the CPU.
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (now - lastTick > 200) { onProgress(); lastTick = now; }
+    }
   }
 }
 
@@ -603,7 +648,13 @@ function drawOverlay() {
   if (!traces.length) {
     ctx.fillStyle = '#666'; ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('no sweeps enabled', w/2, h/2);
+    // Distinguish "user toggled all families off" (no enabled sweeps in the
+    // metadata list) from "still fetching" (sweeps are enabled but their
+    // traces haven't arrived yet).
+    let msg = 'no sweeps enabled';
+    if (_tracesLoading) msg = 'loading sweeps…';
+    else if (enabled.length > 0) msg = 'loading sweeps…';  // enabled but no cache yet
+    ctx.fillText(msg, w/2, h/2);
     return;
   }
   let yMinA = Infinity, yMaxA = -Infinity, xMinA = Infinity, xMaxA = 0;
