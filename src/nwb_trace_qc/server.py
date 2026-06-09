@@ -7,7 +7,7 @@ Serves:
   GET /api/sweeps/<cell_id>      → JSON list of sweep summaries for the cell's NWB
                                      (cached per nwb_sha256 across requests)
   GET /api/trace/<cell_id>/<idx> → JSON-decimated voltage trace for sweep at index `idx`
-                                     ?max_points=1500
+                                     ?max_points=800
 
 Bound to localhost only. No auth — designed for single-user local use.
 
@@ -775,7 +775,7 @@ class _Handler(BaseHTTPRequestHandler):
                 idx = int(idx_str)
             except ValueError as e:
                 raise IndexError(f"bad sweep index {idx_str!r}") from e
-            max_points = int(params.get("max_points", "1500"))
+            max_points = int(params.get("max_points", "800"))
             self._send_json(HTTPStatus.OK, _read_trace(Path(nwb), idx, max_points))
             return
 
